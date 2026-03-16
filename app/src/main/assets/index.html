@@ -435,6 +435,7 @@ var DEFAULT_CFG = {
   chunkSec: 15,
   notesIntervalMin: 10,
   finalIntervalMin: 20,
+  maxNoteBufferChars: 20000,
   notesPrompt: DEFAULT_NOTES_PROMPT,
   finalPrompt: DEFAULT_FINAL_PROMPT,
 };
@@ -697,7 +698,17 @@ function transcribeChunk(blob) {
       var text = (data.text || '').trim();
       if (text) {
         transcript = transcript ? transcript + ' ' + text : text;
-        transcriptSinceLastNote = transcriptSinceLastNote ? transcriptSinceLastNote + ' ' + text : text;
+        transcriptSinceLastNote = transcriptSinceLastNote
+          ? transcriptSinceLastNote + ' ' + text
+          : text;
+
+        // safeguard: fire note early if buffer grows large
+        if (
+          transcriptSinceLastNote.length > (cfg.maxNoteBufferChars || 12000) &&
+          !notesUpdating
+        ) {
+          appendNote(true); // silent auto note
+        }
         renderTranscript();
         autoScroll();
         saveSession();
