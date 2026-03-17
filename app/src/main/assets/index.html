@@ -424,7 +424,7 @@
 // ── DEFAULTS ─────────────────────────────────────────────────────────────────
 var DEFAULT_NOTES_PROMPT = 'You are a D&D session scribe. Given the transcript excerpt below, write a short paragraph (4-6 sentences) summarizing what just happened. Focus on: what the party did, any NPCs they interacted with, decisions made, and anything discovered. Write in past tense. Be concise — this is a running log entry, not a full summary.';
 
-var DEFAULT_FINAL_PROMPT = 'You are a meticulous D&D session scribe. Given the full transcript below, produce structured session notes:\n\n## Session Summary\nA 2-3 sentence narrative overview.\n\n## Key Events\n- Bullet list of major plot moments in order.\n\n## NPCs Encountered\n- Name: brief description / role / attitude\n\n## Decisions Made\n- Notable choices the party made\n\n## Loot & Discoveries\n- Items found, secrets uncovered, locations revealed\n\n## Threads & Hooks\n- Unresolved threads or hooks for next session\n\nKeep it concise but complete. Write in past tense.';
+var DEFAULT_FINAL_PROMPT = 'You are a meticulous D&D session scribe. Given the session notes below, produce structured session summary:\n\n## Session Summary\nA 2-3 sentence narrative overview.\n\n## Key Events\n- Bullet list of major plot moments in order.\n\n## NPCs Encountered\n- Name: brief description / role / attitude\n\n## Decisions Made\n- Notable choices the party made\n\n## Loot & Discoveries\n- Items found, secrets uncovered, locations revealed\n\n## Threads & Hooks\n- Unresolved threads or hooks for next session\n\nKeep it concise but complete. Write in past tense.';
 
 var DEFAULT_CFG = {
   whisperUrl: '',
@@ -447,7 +447,7 @@ var transcriptSinceLastNote = '';
 var recording = false;
 var mediaRecorder = null;
 var audioChunks = [];
-var chunkTimer = null;
+var chunkInterval = null;
 var notesTimer = null;
 var finalTimer = null;
 var notesTimerInterval = null;
@@ -628,21 +628,35 @@ function startRecording() {
     mediaRecorder = new MediaRecorder(stream, { mimeType: mimeType });
     audioChunks = [];
 
-    mediaRecorder.ondataavailable = function(e) { if (e.data.size > 0) audioChunks.push(e.data); };
+    mediaRecorder.ondataavailable = function(e) {
+      if (e.data.size > 0) audioChunks.push(e.data);
+    };
+
     mediaRecorder.onstop = function() {
       if (audioChunks.length > 0) {
         var blob = new Blob(audioChunks, { type: mimeType });
         audioChunks = [];
         transcribeChunk(blob);
       }
+      if (recording) mediaRecorder.start();
     };
 
-    scheduleChunk();
+    mediaRecorder.start();
+
+    chunkInterval = setInterval(function() {
+      if (recording && mediaRecorder.state === 'recording') {
+        mediaRecorder.stop();
+      }
+    }, cfg.chunkSec * 1000);
+
     scheduleNotesTimer();
     scheduleFinalTimer();
     startTimerBars();
-  }).catch(function() {
+
+    renderTranscript();
+  }).catch(function(err) {
     showToast('⚠ Microphone access denied');
+    console.error(err);
   });
 }
 
@@ -650,28 +664,20 @@ function stopRecording() {
   recording = false;
   document.getElementById('recBtn').classList.remove('recording');
   document.getElementById('recLabel').textContent = 'Record';
+
+  clearInterval(chunkInterval);
   if (mediaRecorder && mediaRecorder.state !== 'inactive') mediaRecorder.stop();
   if (mediaRecorder) mediaRecorder.stream.getTracks().forEach(function(t) { t.stop(); });
-  clearTimeout(chunkTimer);
+
   clearTimeout(notesTimer);
   clearTimeout(finalTimer);
   clearInterval(notesTimerInterval);
   clearInterval(finalTimerInterval);
   document.getElementById('notesTimerFill').style.width = '0%';
   document.getElementById('finalTimerFill').style.width = '0%';
+  renderTranscript();
   saveSession();
   showToast('Session saved');
-}
-
-function scheduleChunk() {
-  if (!recording) return;
-  mediaRecorder.start();
-  chunkTimer = setTimeout(function() {
-    if (recording && mediaRecorder.state === 'recording') {
-      mediaRecorder.stop();
-      setTimeout(scheduleChunk, 100);
-    }
-  }, cfg.chunkSec * 1000);
 }
 
 function getSupportedMimeType() {
@@ -697,25 +703,35 @@ function transcribeChunk(blob) {
     .then(function(data) {
       var text = (data.text || '').trim();
       if (text) {
+        var transcriptEl = document.getElementById('transcript-text');
+        if (!transcript) transcriptEl.innerHTML = '';
+
+        var cursor = transcriptEl.querySelector('.cursor-blink');
+        if (cursor) cursor.remove();
+
+        var node = document.createTextNode((transcript ? ' ' : '') + text);
+        transcriptEl.appendChild(node);
+
+        if (recording) {
+          var c = document.createElement('span');
+          c.className = 'cursor-blink';
+          transcriptEl.appendChild(c);
+        }
+
         transcript = transcript ? transcript + ' ' + text : text;
         transcriptSinceLastNote = transcriptSinceLastNote
           ? transcriptSinceLastNote + ' ' + text
           : text;
 
-        // safeguard: fire note early if buffer grows large
-        if (
-          transcriptSinceLastNote.length > (cfg.maxNoteBufferChars || 12000) &&
-          !notesUpdating
-        ) {
-          appendNote(true); // silent auto note
+        if (transcriptSinceLastNote.length > (cfg.maxNoteBufferChars || 12000) && !notesUpdating) {
+          appendNote(true);
         }
-        renderTranscript();
         autoScroll();
         saveSession();
       }
     })
     .catch(function(e) {
-      showToast('⚠ Transcription failed: ' + e.message);
+      console.error('Transcription error:', e);
     });
 }
 
@@ -726,11 +742,15 @@ function renderTranscript() {
     return;
   }
   el.innerHTML = escapeHtml(transcript) + (recording ? '<span class="cursor-blink"></span>' : '');
+  autoScroll();
 }
 
 function autoScroll() {
   var el = document.getElementById('transcriptScroll');
-  el.scrollTop = el.scrollHeight;
+  var isAtBottom = el.scrollHeight - el.clientHeight <= el.scrollTop + 60;
+  if (isAtBottom || !transcript) {
+    el.scrollTop = el.scrollHeight;
+  }
 }
 
 function escapeHtml(s) {
@@ -839,15 +859,15 @@ function scheduleFinalTimer() {
 
 function generateFinal(silent) {
   if (finalUpdating) { if (!silent) showToast('Already generating…'); return; }
-  if (!transcript) { if (!silent) showToast('⚠ No transcript yet'); return; }
+
+  var notes = document.getElementById('notes-editor').value.trim();
+  if (!notes) { if (!silent) showToast('⚠ No notes to summarize yet'); return; }
   if (!cfg.llmUrl) { if (!silent) showToast('⚠ Set LLM URL in settings'); openSettings(); return; }
 
   finalUpdating = true;
   var statusEl = document.getElementById('finalStatus');
   statusEl.textContent = '✦ Consulting the oracle…';
   statusEl.classList.add('updating');
-
-  var notes = document.getElementById('notes-editor').value.trim();
 
   callLLM(
     cfg.finalPrompt,
@@ -926,7 +946,7 @@ function saveSettings() {
   cfg.whisperModel = document.getElementById('s-whisper-model').value || 'base';
   cfg.chunkSec = parseInt(document.getElementById('s-chunk').value) || 15;
   cfg.notesIntervalMin = parseInt(document.getElementById('s-notes-interval').value) || 10;
-  cfg.finalIntervalMin = parseInt(document.getElementById('s-final-interval').value) || 20;
+  cfg.finalIntervalMin = parseInt(document.getElementById('s-final-interval').value) || 120;
   cfg.notesPrompt = document.getElementById('s-notes-prompt').value || DEFAULT_NOTES_PROMPT;
   cfg.finalPrompt = document.getElementById('s-final-prompt').value || DEFAULT_FINAL_PROMPT;
   saveCfg();
