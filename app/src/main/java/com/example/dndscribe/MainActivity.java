@@ -1,8 +1,12 @@
 package com.example.dndscribe;
 
 import android.Manifest;
+import android.content.Intent;
+import android.net.Uri;
 import android.os.Bundle;
+import android.webkit.JavascriptInterface;
 import android.webkit.PermissionRequest;
+import android.webkit.ValueCallback;
 import android.webkit.WebChromeClient;
 import android.webkit.WebResourceRequest;
 import android.webkit.WebResourceResponse;
@@ -21,6 +25,7 @@ import androidx.webkit.WebViewAssetLoader;
 public class MainActivity extends ComponentActivity {
 
     private WebView webView;
+    private ValueCallback<Uri[]> filePathCallback;
 
     private final ActivityResultLauncher<String> requestPermissionLauncher =
             registerForActivityResult(new ActivityResultContracts.RequestPermission(), isGranted -> {
@@ -29,6 +34,15 @@ public class MainActivity extends ComponentActivity {
                 } else {
                     webView.evaluateJavascript(
                             "document.getElementById('recBtn').disabled = false;", null);
+                }
+            });
+
+    private final ActivityResultLauncher<Intent> fileChooserLauncher =
+            registerForActivityResult(new ActivityResultContracts.StartActivityForResult(), result -> {
+                if (filePathCallback != null) {
+                    Uri[] uris = WebChromeClient.FileChooserParams.parseResult(result.getResultCode(), result.getData());
+                    filePathCallback.onReceiveValue(uris);
+                    filePathCallback = null;
                 }
             });
 
@@ -46,13 +60,12 @@ public class MainActivity extends ComponentActivity {
         settings.setDomStorageEnabled(true);
         settings.setMediaPlaybackRequiresUserGesture(false);
         settings.setMixedContentMode(WebSettings.MIXED_CONTENT_ALWAYS_ALLOW);
+        settings.setAllowFileAccess(true);
 
-        // 1. Configure the Asset Loader to serve files securely
         final WebViewAssetLoader assetLoader = new WebViewAssetLoader.Builder()
                 .addPathHandler("/assets/", new WebViewAssetLoader.AssetsPathHandler(this))
                 .build();
 
-        // 2. Intercept the request and serve it via the Asset Loader
         webView.setWebViewClient(new WebViewClient() {
             @Override
             public WebResourceResponse shouldInterceptRequest(WebView view, WebResourceRequest request) {
@@ -62,8 +75,6 @@ public class MainActivity extends ComponentActivity {
             @Override
             public void onPageFinished(WebView view, String url) {
                 super.onPageFinished(view, url);
-
-                // The DOM is now ready. Check if we have permission and unlock the button.
                 if (ContextCompat.checkSelfPermission(MainActivity.this, Manifest.permission.RECORD_AUDIO) == PackageManager.PERMISSION_GRANTED) {
                     view.evaluateJavascript("document.getElementById('recBtn').disabled = false;", null);
                 }
@@ -75,9 +86,39 @@ public class MainActivity extends ComponentActivity {
             public void onPermissionRequest(final PermissionRequest request) {
                 runOnUiThread(() -> request.grant(request.getResources()));
             }
+
+            @Override
+            public boolean onShowFileChooser(WebView webView, ValueCallback<Uri[]> filePathCallback, FileChooserParams fileChooserParams) {
+                MainActivity.this.filePathCallback = filePathCallback;
+                Intent intent = fileChooserParams.createIntent();
+                try {
+                    fileChooserLauncher.launch(intent);
+                } catch (Exception e) {
+                    MainActivity.this.filePathCallback = null;
+                    return false;
+                }
+                return true;
+            }
         });
 
-        // 3. Load using the virtual HTTPS domain instead of file:///
+        webView.addJavascriptInterface(new Object() {
+            @JavascriptInterface
+            public void share(String data) {
+                Intent sendIntent = new Intent();
+                sendIntent.setAction(Intent.ACTION_SEND);
+                sendIntent.putExtra(Intent.EXTRA_TEXT, data);
+                sendIntent.setType("application/json");
+                Intent shareIntent = Intent.createChooser(sendIntent, "Export Archives");
+                startActivity(shareIntent);
+            }
+        }, "AndroidScribe");
+
+        webView.setDownloadListener((url, userAgent, contentDisposition, mimetype, contentLength) -> {
+            Intent i = new Intent(Intent.ACTION_VIEW);
+            i.setData(Uri.parse(url));
+            startActivity(i);
+        });
+
         webView.loadUrl("https://appassets.androidplatform.net/assets/index.html");
     }
 }

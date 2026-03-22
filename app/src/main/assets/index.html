@@ -242,8 +242,13 @@
     font-size: 0.95rem; padding: 8px 12px; outline: none; transition: border-color 0.2s;
   }
   .field-input:focus, .field-textarea:focus { border-color: var(--gold); background: rgba(255,255,255,0.08); }
+  .field-input:disabled { opacity: 0.3; cursor: not-allowed; }
   .field-textarea { resize: vertical; min-height: 80px; line-height: 1.5; }
   .field-row { display: grid; grid-template-columns: 1fr 1fr; gap: 12px; }
+  .checkbox-group { display: flex; align-items: center; gap: 8px; margin-bottom: 12px; }
+  .checkbox-group input { width: 16px; height: 16px; cursor: pointer; }
+  .checkbox-group label { font-family: 'Cinzel', serif; font-size: 0.6rem; color: var(--gold); opacity: 0.8; text-transform: uppercase; cursor: pointer; }
+
   .save-btn {
     width: 100%; margin-top: 14px; padding: 12px;
     background: linear-gradient(135deg, var(--gold), var(--gold-light));
@@ -358,59 +363,69 @@
     <div class="sheet-handle"></div>
     <div class="settings-title">⚙ Scribe Configuration</div>
 
-    <div class="settings-section">API Endpoints</div>
-
+    <div class="settings-section">LLM Configuration (Notes/Final)</div>
     <div class="field-group">
-      <label class="field-label">Whisper Base URL</label>
-      <input class="field-input" id="s-whisper-url" type="url" placeholder="http://10.0.0.x:8080" autocomplete="off" />
-    </div>
-    <div class="field-group">
-      <label class="field-label">LLM Base URL</label>
-      <input class="field-input" id="s-llm-url" type="url" placeholder="https://your-openwebui.example.com" autocomplete="off" />
-    </div>
-    <div class="field-group">
-      <label class="field-label">LLM API Key</label>
-      <input class="field-input" id="s-api-key" type="password" placeholder="sk-... or leave blank" autocomplete="off" />
+      <label class="field-label">Base URL</label>
+      <input class="field-input" id="s-llm-url" type="url" placeholder="https://your-llm-api.com" autocomplete="off" />
     </div>
     <div class="field-row">
       <div class="field-group">
-        <label class="field-label">LLM Model</label>
-        <input class="field-input" id="s-llm-model" type="text" placeholder="mistral" />
+        <label class="field-label">API Key</label>
+        <input class="field-input" id="s-api-key" type="password" placeholder="sk-..." autocomplete="off" />
       </div>
       <div class="field-group">
-        <label class="field-label">Whisper Model</label>
-        <input class="field-input" id="s-whisper-model" type="text" placeholder="base" />
+        <label class="field-label">Model</label>
+        <input class="field-input" id="s-llm-model" type="text" placeholder="mistral" />
       </div>
+    </div>
+
+    <div class="settings-section">Whisper Configuration (Speech)</div>
+    <div class="checkbox-group">
+      <input type="checkbox" id="s-sync-api" />
+      <label for="s-sync-api">Use LLM URL & Key for Whisper</label>
+    </div>
+    <div id="whisper-specific-fields">
+      <div class="field-group">
+        <label class="field-label">Whisper URL</label>
+        <input class="field-input" id="s-whisper-url" type="url" placeholder="http://10.0.0.x:8080" autocomplete="off" />
+      </div>
+      <div class="field-group">
+        <label class="field-label">Whisper API Key</label>
+        <input class="field-input" id="s-whisper-key" type="password" placeholder="leave blank if none" autocomplete="off" />
+      </div>
+    </div>
+    <div class="field-group">
+      <label class="field-label">Whisper Model Name</label>
+      <input class="field-input" id="s-whisper-model" type="text" placeholder="base" />
     </div>
 
     <div class="settings-section">Timers</div>
-
     <div class="field-row">
       <div class="field-group">
-        <label class="field-label">Chunk Length (sec)</label>
+        <label class="field-label">Chunk (sec)</label>
         <input class="field-input" id="s-chunk" type="number" min="5" max="60" />
       </div>
       <div class="field-group">
-        <label class="field-label">Notes Interval (min)</label>
+        <label class="field-label">Notes (min)</label>
         <input class="field-input" id="s-notes-interval" type="number" min="1" max="60" />
       </div>
     </div>
     <div class="field-row">
       <div class="field-group">
-        <label class="field-label">Final Interval (min)</label>
-        <input class="field-input" id="s-final-interval" type="number" min="1" max="120" />
+        <label class="field-label">Final (min)</label>
+        <input class="field-input" id="s-final-interval" type="number" min="1" max="480" />
       </div>
       <div class="field-group"></div>
     </div>
 
-    <div class="settings-section">Notes Prompt</div>
+    <div class="settings-section">Prompts</div>
     <div class="field-group">
-      <textarea class="field-textarea" id="s-notes-prompt" rows="5"></textarea>
+      <label class="field-label">Notes Prompt</label>
+      <textarea class="field-textarea" id="s-notes-prompt" rows="3"></textarea>
     </div>
-
-    <div class="settings-section">Final Summary Prompt</div>
     <div class="field-group">
-      <textarea class="field-textarea" id="s-final-prompt" rows="5"></textarea>
+      <label class="field-label">Final Prompt</label>
+      <textarea class="field-textarea" id="s-final-prompt" rows="3"></textarea>
     </div>
 
     <button class="save-btn" id="saveSettingsBtn">Save & Close</button>
@@ -428,13 +443,15 @@ var DEFAULT_FINAL_PROMPT = 'You are a meticulous D&D session scribe. Given the s
 
 var DEFAULT_CFG = {
   whisperUrl: '',
+  whisperApiKey: '',
   llmUrl: '',
   apiKey: '',
+  syncApiSettings: false,
   llmModel: 'mistral',
   whisperModel: 'base',
   chunkSec: 15,
   notesIntervalMin: 10,
-  finalIntervalMin: 20,
+  finalIntervalMin: 120,
   maxNoteBufferChars: 20000,
   notesPrompt: DEFAULT_NOTES_PROMPT,
   finalPrompt: DEFAULT_FINAL_PROMPT,
@@ -617,7 +634,8 @@ function toggleRecording() {
 }
 
 function startRecording() {
-  if (!cfg.whisperUrl) { showToast('⚠ Set Whisper URL in settings'); openSettings(); return; }
+  var whisperUrl = cfg.syncApiSettings ? cfg.llmUrl : cfg.whisperUrl;
+  if (!whisperUrl) { showToast('⚠ Set Whisper URL in settings'); openSettings(); return; }
 
   navigator.mediaDevices.getUserMedia({ audio: true, video: false }).then(function(stream) {
     recording = true;
@@ -695,7 +713,13 @@ function transcribeChunk(blob) {
   formData.append('model', cfg.whisperModel || 'base');
   formData.append('response_format', 'json');
 
-  fetch(cfg.whisperUrl + '/v1/audio/transcriptions', { method: 'POST', body: formData })
+  var whisperUrl = cfg.syncApiSettings ? cfg.llmUrl : cfg.whisperUrl;
+  var whisperKey = cfg.syncApiSettings ? cfg.apiKey : cfg.whisperApiKey;
+
+  var headers = {};
+  if (whisperKey) headers['Authorization'] = 'Bearer ' + whisperKey;
+
+  fetch(whisperUrl + '/v1/audio/transcriptions', { method: 'POST', headers: headers, body: formData })
     .then(function(res) {
       if (!res.ok) throw new Error('HTTP ' + res.status);
       return res.json();
@@ -746,11 +770,18 @@ function renderTranscript() {
 }
 
 function autoScroll() {
-  var el = document.getElementById('transcriptScroll');
-  var isAtBottom = el.scrollHeight - el.clientHeight <= el.scrollTop + 60;
-  if (isAtBottom || !transcript) {
-    el.scrollTop = el.scrollHeight;
-  }
+  requestAnimationFrame(function() {
+    var el = document.getElementById('transcriptScroll');
+    if (!el) return;
+
+    // Check if we are near the bottom (within 150px)
+    var isAtBottom = el.scrollHeight - el.scrollTop - el.clientHeight < 150;
+
+    // Always scroll if transcript was just cleared
+    if (isAtBottom || !transcript) {
+      el.scrollTop = el.scrollHeight;
+    }
+  });
 }
 
 function escapeHtml(s) {
@@ -921,17 +952,30 @@ function startTimerBars() {
 
 // ── SETTINGS ──────────────────────────────────────────────────────────────────
 function openSettings() {
-  document.getElementById('s-whisper-url').value = cfg.whisperUrl || '';
   document.getElementById('s-llm-url').value = cfg.llmUrl || '';
   document.getElementById('s-api-key').value = cfg.apiKey || '';
   document.getElementById('s-llm-model').value = cfg.llmModel || 'mistral';
+
+  var syncCheck = document.getElementById('s-sync-api');
+  syncCheck.checked = !!cfg.syncApiSettings;
+  updateSyncFields(syncCheck.checked);
+
+  document.getElementById('s-whisper-url').value = cfg.whisperUrl || '';
+  document.getElementById('s-whisper-key').value = cfg.whisperApiKey || '';
   document.getElementById('s-whisper-model').value = cfg.whisperModel || 'base';
+
   document.getElementById('s-chunk').value = cfg.chunkSec || 15;
   document.getElementById('s-notes-interval').value = cfg.notesIntervalMin || 10;
-  document.getElementById('s-final-interval').value = cfg.finalIntervalMin || 20;
+  document.getElementById('s-final-interval').value = cfg.finalIntervalMin || 120;
   document.getElementById('s-notes-prompt').value = cfg.notesPrompt || DEFAULT_NOTES_PROMPT;
   document.getElementById('s-final-prompt').value = cfg.finalPrompt || DEFAULT_FINAL_PROMPT;
+
   document.getElementById('settingsOverlay').classList.add('open');
+}
+
+function updateSyncFields(synced) {
+  var whisperFields = document.getElementById('whisper-specific-fields');
+  whisperFields.style.display = synced ? 'none' : 'block';
 }
 
 function closeSettings() {
@@ -939,32 +983,59 @@ function closeSettings() {
 }
 
 function saveSettings() {
-  cfg.whisperUrl = (document.getElementById('s-whisper-url').value || '').replace(/\/$/, '');
   cfg.llmUrl = (document.getElementById('s-llm-url').value || '').replace(/\/$/, '');
   cfg.apiKey = document.getElementById('s-api-key').value || '';
   cfg.llmModel = document.getElementById('s-llm-model').value || 'mistral';
+
+  cfg.syncApiSettings = document.getElementById('s-sync-api').checked;
+  cfg.whisperUrl = (document.getElementById('s-whisper-url').value || '').replace(/\/$/, '');
+  cfg.whisperApiKey = document.getElementById('s-whisper-key').value || '';
+
   cfg.whisperModel = document.getElementById('s-whisper-model').value || 'base';
   cfg.chunkSec = parseInt(document.getElementById('s-chunk').value) || 15;
   cfg.notesIntervalMin = parseInt(document.getElementById('s-notes-interval').value) || 10;
   cfg.finalIntervalMin = parseInt(document.getElementById('s-final-interval').value) || 120;
   cfg.notesPrompt = document.getElementById('s-notes-prompt').value || DEFAULT_NOTES_PROMPT;
   cfg.finalPrompt = document.getElementById('s-final-prompt').value || DEFAULT_FINAL_PROMPT;
+
   saveCfg();
   closeSettings();
   showToast('Settings saved ✦');
 }
 
-// ── COPY ──────────────────────────────────────────────────────────────────────
-function copyNotes() {
-  var text = document.getElementById('notes-editor').value;
-  if (!text) { showToast('⚠ No notes to copy'); return; }
-  navigator.clipboard.writeText(text).then(function() { showToast('Copied ✦'); });
-}
+// ── EXPORT ────────────────────────────────────────────────────────────────────
+function exportArchives() {
+  var data = localStorage.getItem('dnd-archives') || '[]';
 
-function copyFinal() {
-  var text = document.getElementById('final-editor').value;
-  if (!text) { showToast('⚠ No summary to copy'); return; }
-  navigator.clipboard.writeText(text).then(function() { showToast('Copied ✦'); });
+  if (window.AndroidScribe && window.AndroidScribe.share) {
+    window.AndroidScribe.share(data);
+    showToast('Exporting via Android Share...');
+    return;
+  }
+
+  // Attempt standard download first (DownloadListener should catch this)
+  var blob = new Blob([data], { type: 'application/json' });
+  var url = URL.createObjectURL(blob);
+  var a = document.createElement('a');
+  a.href = url;
+  a.download = 'dnd_scribe_archives.json';
+
+  // Also try navigator.share if available as fallback/alternative for mobile
+  if (navigator.share) {
+    navigator.share({
+      title: 'DnD Scribe Archives',
+      text: data
+    }).catch(function() {
+      // Fallback if share cancelled/failed
+      a.click();
+      URL.revokeObjectURL(url);
+      showToast('Export triggered');
+    });
+  } else {
+    a.click();
+    URL.revokeObjectURL(url);
+    showToast('Export triggered');
+  }
 }
 
 // ── TOAST ─────────────────────────────────────────────────────────────────────
@@ -983,6 +1054,10 @@ document.addEventListener('DOMContentLoaded', function() {
   document.getElementById('recBtn').addEventListener('click', toggleRecording);
   document.getElementById('settingsGear').addEventListener('click', openSettings);
   document.getElementById('saveSettingsBtn').addEventListener('click', saveSettings);
+  document.getElementById('s-sync-api').addEventListener('change', function(e) {
+    updateSyncFields(e.target.checked);
+  });
+
   document.getElementById('clearSessionBtn').addEventListener('click', function() {
     if (confirm('Clear the currently active transcript and all notes?')) {
       clearSavedSession();
@@ -1008,16 +1083,7 @@ document.addEventListener('DOMContentLoaded', function() {
 
   // Archive actions
   document.getElementById('btn-save-current').addEventListener('click', saveCurrentToArchives);
-  document.getElementById('btn-export').addEventListener('click', function() {
-    var data = localStorage.getItem('dnd-archives') || '[]';
-    var blob = new Blob([data], { type: 'application/json' });
-    var url = URL.createObjectURL(blob);
-    var a = document.createElement('a');
-    a.href = url;
-    a.download = 'dnd_scribe_archives.json';
-    a.click();
-    URL.revokeObjectURL(url);
-  });
+  document.getElementById('btn-export').addEventListener('click', exportArchives);
   document.getElementById('file-import').addEventListener('change', function(e) {
     var file = e.target.files[0];
     if (!file) return;
@@ -1048,7 +1114,7 @@ document.addEventListener('DOMContentLoaded', function() {
   document.getElementById('notes-editor').addEventListener('input', saveSession);
   document.getElementById('final-editor').addEventListener('input', saveSession);
 
-  if (!cfg.whisperUrl || !cfg.llmUrl) {
+  if (!cfg.whisperUrl && !cfg.llmUrl) {
     setTimeout(function() { showToast('⚙ Configure your API URLs to begin'); }, 800);
   }
 });
