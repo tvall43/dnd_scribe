@@ -12,6 +12,7 @@ import androidx.lifecycle.viewModelScope
 import com.example.dndscribe.data.local.AppDatabase
 import com.example.dndscribe.data.local.SessionEntity
 import com.example.dndscribe.data.remote.AiSessionClient
+import com.example.dndscribe.data.repository.ActiveSessionRepository
 import com.example.dndscribe.data.repository.AppConfig
 import com.example.dndscribe.data.repository.SessionRepository
 import com.example.dndscribe.data.repository.SettingsRepository
@@ -19,8 +20,10 @@ import com.example.dndscribe.recording.ActiveSessionState
 import com.example.dndscribe.recording.RecordingService
 import com.google.gson.Gson
 import com.google.gson.reflect.TypeToken
+import androidx.core.content.FileProvider
 import kotlinx.coroutines.flow.*
 import kotlinx.coroutines.launch
+import java.io.File
 import java.text.SimpleDateFormat
 import java.util.Date
 import java.util.Locale
@@ -28,6 +31,7 @@ import java.util.Locale
 class MainViewModel(application: Application) : AndroidViewModel(application) {
     private val sessionRepository = SessionRepository(AppDatabase.getDatabase(application).sessionDao())
     private val settingsRepository = SettingsRepository(application)
+    private val activeSessionRepository = ActiveSessionRepository(application)
     private val gson = Gson()
 
     private val _config = MutableStateFlow(AppConfig())
@@ -60,6 +64,10 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
                     _config.value = it
                 }
             }
+        }
+        viewModelScope.launch {
+            val snapshot = activeSessionRepository.snapshotFlow.first()
+            ActiveSessionState.restore(snapshot.transcript, snapshot.notes, snapshot.finalSummary)
         }
     }
 
@@ -98,6 +106,7 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
                 if (!note.isNullOrBlank()) {
                     val time = SimpleDateFormat("HH:mm", Locale.getDefault()).format(Date())
                     ActiveSessionState.appendNote("-- $time --\n$note")
+                    persistActiveSessionContent()
                 }
             } catch (e: Exception) {
                 Log.e("MainViewModel", "Note generation failed", e)
@@ -128,6 +137,7 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
                 val summary = AiSessionClient.generateFinal(cfg, currentNotes.value)
                 if (!summary.isNullOrBlank()) {
                     ActiveSessionState.setFinalSummary(summary)
+                    persistActiveSessionContent()
                 }
             } catch (e: Exception) {
                 Log.e("MainViewModel", "Final summary failed", e)
@@ -160,6 +170,9 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
 
     fun clearActiveSession() {
         ActiveSessionState.clear()
+        viewModelScope.launch {
+            activeSessionRepository.clear()
+        }
     }
     
     fun updateConfig(newConfig: AppConfig) {
@@ -172,6 +185,9 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
 
     fun updateNotes(newNotes: String) {
         ActiveSessionState.updateNotes(newNotes)
+        viewModelScope.launch {
+            persistActiveSessionContent()
+        }
     }
 
     fun deleteSession(session: SessionEntity) {
@@ -186,6 +202,9 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
             return
         }
         ActiveSessionState.load(session)
+        viewModelScope.launch {
+            persistActiveSessionContent()
+        }
     }
 
     fun exportArchives(context: Context) {
@@ -197,11 +216,24 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
                     return@launch
                 }
                 val json = gson.toJson(sessions)
+                val exportDir = File(context.cacheDir, "exports")
+                if (!exportDir.exists()) {
+                    exportDir.mkdirs()
+                }
+                val fileName = "dnd-scribe-archives-${SimpleDateFormat("yyyyMMdd-HHmmss", Locale.US).format(Date())}.json"
+                val exportFile = File(exportDir, fileName)
+                exportFile.writeText(json)
+                val uri = FileProvider.getUriForFile(
+                    context,
+                    "${context.packageName}.fileprovider",
+                    exportFile
+                )
                 
                 val sendIntent: Intent = Intent().apply {
                     action = Intent.ACTION_SEND
-                    putExtra(Intent.EXTRA_TEXT, json)
-                    type = "text/plain"
+                    putExtra(Intent.EXTRA_STREAM, uri)
+                    addFlags(Intent.FLAG_GRANT_READ_URI_PERMISSION)
+                    type = "application/json"
                 }
                 
                 val shareIntent = Intent.createChooser(sendIntent, "Export DnD Scribe Archives")
@@ -231,5 +263,13 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
                 Toast.makeText(context, "Import failed: ${e.message}", Toast.LENGTH_SHORT).show()
             }
         }
+    }
+
+    private suspend fun persistActiveSessionContent() {
+        activeSessionRepository.updateContent(
+            transcript = currentTranscript.value,
+            notes = currentNotes.value,
+            finalSummary = finalSummary.value
+        )
     }
 }

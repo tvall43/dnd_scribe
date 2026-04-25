@@ -1,9 +1,10 @@
 package com.example.dndscribe.recording
 
+import android.R as AndroidR
 import android.app.Notification
 import android.app.NotificationChannel
 import android.app.NotificationManager
-import android.R as AndroidR
+import android.app.PendingIntent
 import android.app.Service
 import android.content.Context
 import android.content.Intent
@@ -15,6 +16,8 @@ import android.util.Log
 import android.widget.Toast
 import androidx.core.app.NotificationCompat
 import com.example.dndscribe.data.remote.AiSessionClient
+import com.example.dndscribe.data.repository.ActiveSessionRepository
+import com.example.dndscribe.data.repository.ActiveSessionSnapshot
 import com.example.dndscribe.data.repository.AppConfig
 import com.example.dndscribe.data.repository.SettingsRepository
 import kotlinx.coroutines.CoroutineScope
@@ -34,6 +37,7 @@ import java.util.Locale
 class RecordingService : Service() {
     private val serviceScope = CoroutineScope(SupervisorJob() + Dispatchers.Main.immediate)
     private val settingsRepository by lazy { SettingsRepository(applicationContext) }
+    private val activeSessionRepository by lazy { ActiveSessionRepository(applicationContext) }
 
     private var currentConfig = AppConfig()
     private var mediaRecorder: MediaRecorder? = null
@@ -54,6 +58,7 @@ class RecordingService : Service() {
         when (intent?.action) {
             ACTION_START -> serviceScope.launch {
                 currentConfig = settingsRepository.configFlow.first()
+                restorePersistedSession()
                 startRecording()
             }
             ACTION_STOP -> serviceScope.launch { stopRecordingAndShutdown() }
@@ -72,7 +77,7 @@ class RecordingService : Service() {
 
     override fun onBind(intent: Intent?): IBinder? = null
 
-    private fun startRecording() {
+    private suspend fun startRecording() {
         if (ActiveSessionState.isRecording.value) return
 
         if (!AiSessionClient.validateBaseUrl(resolveWhisperBaseUrl(currentConfig), currentConfig.allowInsecureHttp)) {
@@ -87,9 +92,13 @@ class RecordingService : Service() {
         try {
             mediaRecorder = createRecorder(audioFile)
             ActiveSessionState.setRecording(true)
-            transcriptSinceLastNote = ""
-            lastNoteTime = System.currentTimeMillis()
-            lastFinalTime = System.currentTimeMillis()
+            if (lastNoteTime == 0L) {
+                lastNoteTime = System.currentTimeMillis()
+            }
+            if (lastFinalTime == 0L) {
+                lastFinalTime = System.currentTimeMillis()
+            }
+            persistActiveSession()
             startRecordingLoop(audioFile)
         } catch (e: Exception) {
             Log.e(TAG, "Failed to start recording", e)
@@ -137,6 +146,8 @@ class RecordingService : Service() {
             transcribeFile(stoppedFile)
         }
 
+        persistActiveSession()
+
         stopForeground(STOP_FOREGROUND_REMOVE)
         stopSelf()
     }
@@ -161,6 +172,7 @@ class RecordingService : Service() {
             if (text.isNotBlank()) {
                 ActiveSessionState.appendTranscript(text)
                 transcriptSinceLastNote += (if (transcriptSinceLastNote.isEmpty()) "" else " ") + text
+                persistActiveSession()
             }
         } catch (e: Exception) {
             Log.e(TAG, "Transcription failed", e)
@@ -183,6 +195,7 @@ class RecordingService : Service() {
                 ActiveSessionState.appendNote("-- $time --\n$note")
                 transcriptSinceLastNote = ""
                 lastNoteTime = System.currentTimeMillis()
+                persistActiveSession()
             }
         } catch (e: Exception) {
             Log.e(TAG, "Note generation failed", e)
@@ -201,6 +214,7 @@ class RecordingService : Service() {
             if (!summary.isNullOrBlank()) {
                 ActiveSessionState.setFinalSummary(summary)
                 lastFinalTime = System.currentTimeMillis()
+                persistActiveSession()
             }
         } catch (e: Exception) {
             Log.e(TAG, "Final summary failed", e)
@@ -256,11 +270,20 @@ class RecordingService : Service() {
     }
 
     private fun buildNotification(): Notification {
+        val stopPendingIntent = PendingIntent.getService(
+            this,
+            0,
+            stopIntent(this),
+            PendingIntent.FLAG_UPDATE_CURRENT or PendingIntent.FLAG_IMMUTABLE
+        )
+
         return NotificationCompat.Builder(this, CHANNEL_ID)
             .setSmallIcon(AndroidR.drawable.ic_btn_speak_now)
             .setContentTitle("DnD Scribe recording")
             .setContentText("Transcribing your session in the background")
             .setOngoing(true)
+            .setOnlyAlertOnce(true)
+            .addAction(AndroidR.drawable.ic_media_pause, "Stop", stopPendingIntent)
             .build()
     }
 
@@ -280,6 +303,27 @@ class RecordingService : Service() {
         serviceScope.launch(Dispatchers.Main) {
             Toast.makeText(applicationContext, message, Toast.LENGTH_LONG).show()
         }
+    }
+
+    private suspend fun persistActiveSession() {
+        activeSessionRepository.updateAll(
+            ActiveSessionSnapshot(
+                transcript = ActiveSessionState.currentTranscript.value,
+                notes = ActiveSessionState.currentNotes.value,
+                finalSummary = ActiveSessionState.finalSummary.value,
+                transcriptSinceLastNote = transcriptSinceLastNote,
+                lastNoteTime = lastNoteTime,
+                lastFinalTime = lastFinalTime
+            )
+        )
+    }
+
+    private suspend fun restorePersistedSession() {
+        val snapshot = activeSessionRepository.snapshotFlow.first()
+        ActiveSessionState.restore(snapshot.transcript, snapshot.notes, snapshot.finalSummary)
+        transcriptSinceLastNote = snapshot.transcriptSinceLastNote
+        lastNoteTime = snapshot.lastNoteTime
+        lastFinalTime = snapshot.lastFinalTime
     }
 
     companion object {

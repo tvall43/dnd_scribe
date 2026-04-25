@@ -64,4 +64,10 @@ object ActiveSessionState {
         _currentNotes.value = session.notes
         _finalSummary.value = session.finalSummary
     }
+
+    fun restore(transcript: String, notes: String, finalSummary: String) {
+        _currentTranscript.value = transcript
+        _currentNotes.value = notes
+        _finalSummary.value = finalSummary
+    }
 }
