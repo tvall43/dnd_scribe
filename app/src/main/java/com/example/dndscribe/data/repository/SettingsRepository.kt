@@ -16,9 +16,10 @@ data class AppConfig(
     val whisperApiKey: String = "",
     val llmUrl: String = "",
     val llmApiKey: String = "",
+    val allowInsecureHttp: Boolean = false,
     val syncApiSettings: Boolean = false,
     val llmModel: String = "mistral",
-    val whisperModel: String = "base",
+    val whisperModel: String = "whisper-1",
     val chunkSec: Int = 15,
     val notesIntervalMin: Int = 10,
     val finalIntervalMin: Int = 120,
@@ -32,6 +33,7 @@ class SettingsRepository(private val context: Context) {
         val WHISPER_API_KEY = stringPreferencesKey("whisper_api_key")
         val LLM_URL = stringPreferencesKey("llm_url")
         val LLM_API_KEY = stringPreferencesKey("llm_api_key")
+        val ALLOW_INSECURE_HTTP = booleanPreferencesKey("allow_insecure_http")
         val SYNC_API = booleanPreferencesKey("sync_api")
         val LLM_MODEL = stringPreferencesKey("llm_model")
         val WHISPER_MODEL = stringPreferencesKey("whisper_model")
@@ -56,6 +58,7 @@ class SettingsRepository(private val context: Context) {
                 whisperApiKey = preferences[Keys.WHISPER_API_KEY] ?: "",
                 llmUrl = preferences[Keys.LLM_URL] ?: "",
                 llmApiKey = preferences[Keys.LLM_API_KEY] ?: "",
+                allowInsecureHttp = preferences[Keys.ALLOW_INSECURE_HTTP] ?: false,
                 syncApiSettings = preferences[Keys.SYNC_API] ?: false,
                 llmModel = preferences[Keys.LLM_MODEL] ?: "mistral",
                 whisperModel = preferences[Keys.WHISPER_MODEL] ?: "base",
@@ -73,6 +76,7 @@ class SettingsRepository(private val context: Context) {
             preferences[Keys.WHISPER_API_KEY] = config.whisperApiKey
             preferences[Keys.LLM_URL] = config.llmUrl
             preferences[Keys.LLM_API_KEY] = config.llmApiKey
+            preferences[Keys.ALLOW_INSECURE_HTTP] = config.allowInsecureHttp
             preferences[Keys.SYNC_API] = config.syncApiSettings
             preferences[Keys.LLM_MODEL] = config.llmModel
             preferences[Keys.WHISPER_MODEL] = config.whisperModel

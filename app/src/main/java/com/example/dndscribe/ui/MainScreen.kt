@@ -41,7 +41,7 @@ fun MainScreen(viewModel: MainViewModel = viewModel()) {
             CenterAlignedTopAppBar(
                 title = { Text("⚔️ DnD Scribe", color = Gold, fontWeight = FontWeight.Bold) },
                 actions = {
-                    IconButton(onClick = { viewModel.saveCurrentSession() }) {
+                    IconButton(onClick = { viewModel.saveCurrentSession() }, enabled = !isRecording) {
                         Icon(Icons.Default.Save, contentDescription = "Save", tint = Gold)
                     }
                     IconButton(onClick = { showSettings = true }) {
@@ -291,6 +291,19 @@ fun SettingsDialog(viewModel: MainViewModel, onDismiss: () -> Unit) {
                     Spacer(modifier = Modifier.height(16.dp))
                     
                     Row(verticalAlignment = Alignment.CenterVertically) {
+                        Checkbox(checked = config.allowInsecureHttp, onCheckedChange = { viewModel.updateConfig(config.copy(allowInsecureHttp = it)) })
+                        Text("Allow insecure HTTP endpoints")
+                    }
+                    AnimatedVisibility(visible = config.allowInsecureHttp) {
+                        Text(
+                            "Warning: API keys, transcripts, and summaries can cross the network without TLS when you use http:// URLs.",
+                            color = MaterialTheme.colorScheme.error,
+                            fontSize = 12.sp,
+                            modifier = Modifier.padding(bottom = 8.dp)
+                        )
+                    }
+
+                    Row(verticalAlignment = Alignment.CenterVertically) {
                         Checkbox(checked = config.syncApiSettings, onCheckedChange = { viewModel.updateConfig(config.copy(syncApiSettings = it)) })
                         Text("Use LLM URL for Whisper")
                     }
@@ -299,6 +312,7 @@ fun SettingsDialog(viewModel: MainViewModel, onDismiss: () -> Unit) {
                         TextField(value = config.whisperUrl, onValueChange = { viewModel.updateConfig(config.copy(whisperUrl = it)) }, label = { Text("Whisper Base URL") })
                         TextField(value = config.whisperApiKey, onValueChange = { viewModel.updateConfig(config.copy(whisperApiKey = it)) }, label = { Text("Whisper API Key") })
                     }
+                    TextField(value = config.whisperModel, onValueChange = { viewModel.updateConfig(config.copy(whisperModel = it)) }, label = { Text("Whisper Model Name") })
                     
                     Spacer(modifier = Modifier.height(16.dp))
                     Text("Timers", fontWeight = FontWeight.Bold)

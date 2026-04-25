@@ -3,31 +3,24 @@ package com.example.dndscribe.ui
 import android.app.Application
 import android.content.Context
 import android.content.Intent
-import android.media.MediaRecorder
 import android.net.Uri
-import android.os.Build
+import android.widget.Toast
 import android.util.Log
+import androidx.core.content.ContextCompat
 import androidx.lifecycle.AndroidViewModel
 import androidx.lifecycle.viewModelScope
 import com.example.dndscribe.data.local.AppDatabase
 import com.example.dndscribe.data.local.SessionEntity
-import com.example.dndscribe.data.remote.LlmMessage
-import com.example.dndscribe.data.remote.LlmRequest
-import com.example.dndscribe.data.remote.RetrofitClient
+import com.example.dndscribe.data.remote.AiSessionClient
 import com.example.dndscribe.data.repository.AppConfig
 import com.example.dndscribe.data.repository.SessionRepository
 import com.example.dndscribe.data.repository.SettingsRepository
+import com.example.dndscribe.recording.ActiveSessionState
+import com.example.dndscribe.recording.RecordingService
 import com.google.gson.Gson
 import com.google.gson.reflect.TypeToken
-import kotlinx.coroutines.Job
-import kotlinx.coroutines.delay
 import kotlinx.coroutines.flow.*
 import kotlinx.coroutines.launch
-import okhttp3.MediaType.Companion.toMediaTypeOrNull
-import okhttp3.MultipartBody
-import okhttp3.RequestBody.Companion.asRequestBody
-import okhttp3.RequestBody.Companion.toRequestBody
-import java.io.File
 import java.text.SimpleDateFormat
 import java.util.Date
 import java.util.Locale
@@ -40,32 +33,15 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
     private val _config = MutableStateFlow(AppConfig())
     val config = _config.asStateFlow()
 
-    private val _currentTranscript = MutableStateFlow("")
-    val currentTranscript = _currentTranscript.asStateFlow()
-
-    private val _currentNotes = MutableStateFlow("")
-    val currentNotes = _currentNotes.asStateFlow()
-
-    private val _finalSummary = MutableStateFlow("")
-    val finalSummary = _finalSummary.asStateFlow()
-
-    private val _isRecording = MutableStateFlow(false)
-    val isRecording = _isRecording.asStateFlow()
-
-    private val _isUpdatingNotes = MutableStateFlow(false)
-    val isUpdatingNotes = _isUpdatingNotes.asStateFlow()
-
-    private val _isGeneratingFinal = MutableStateFlow(false)
-    val isGeneratingFinal = _isGeneratingFinal.asStateFlow()
+    val currentTranscript = ActiveSessionState.currentTranscript
+    val currentNotes = ActiveSessionState.currentNotes
+    val finalSummary = ActiveSessionState.finalSummary
+    val isRecording = ActiveSessionState.isRecording
+    val isUpdatingNotes = ActiveSessionState.isUpdatingNotes
+    val isGeneratingFinal = ActiveSessionState.isGeneratingFinal
 
     private val _searchQuery = MutableStateFlow("")
     val searchQuery = _searchQuery.asStateFlow()
-
-    private var mediaRecorder: MediaRecorder? = null
-    private var recordingJob: Job? = null
-    private var transcriptSinceLastNote = ""
-    private var lastNoteTime = System.currentTimeMillis()
-    private var lastFinalTime = System.currentTimeMillis()
 
     val allSessions = sessionRepository.allSessions
     
@@ -80,8 +56,6 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
     init {
         viewModelScope.launch {
             settingsRepository.configFlow.collect {
-                // Only update if it's different to avoid overwriting newer in-memory changes
-                // with slower DataStore emissions during rapid typing.
                 if (_config.value != it) {
                     _config.value = it
                 }
@@ -94,236 +68,90 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
     }
 
     fun toggleRecording() {
-        if (_isRecording.value) {
-            stopRecording()
-        } else {
-            startRecording()
-        }
-    }
-
-    private fun startRecording() {
         val context = getApplication<Application>().applicationContext
-        val audioFile = File(context.cacheDir, "recording.webm")
-        
-        try {
-            mediaRecorder = if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.S) {
-                MediaRecorder(context)
-            } else {
-                @Suppress("DEPRECATION")
-                MediaRecorder()
-            }.apply {
-                setAudioSource(MediaRecorder.AudioSource.MIC)
-                setOutputFormat(MediaRecorder.OutputFormat.WEBM)
-                if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.Q) {
-                    setAudioEncoder(MediaRecorder.AudioEncoder.OPUS)
-                } else {
-                    setAudioEncoder(MediaRecorder.AudioEncoder.AAC)
-                }
-                setOutputFile(audioFile.absolutePath)
-                prepare()
-                start()
-            }
-            _isRecording.value = true
-            lastNoteTime = System.currentTimeMillis()
-            lastFinalTime = System.currentTimeMillis()
-            
-            startRecordingLoop(audioFile)
-        } catch (e: Exception) {
-            Log.e("MainViewModel", "Failed to start recording", e)
+        if (isRecording.value) {
+            context.startService(RecordingService.stopIntent(context))
+        } else {
+            ContextCompat.startForegroundService(context, RecordingService.startIntent(context))
         }
-    }
-
-    private fun startRecordingLoop(audioFile: File) {
-        recordingJob = viewModelScope.launch {
-            while (_isRecording.value) {
-                delay(_config.value.chunkSec * 1000L)
-                if (_isRecording.value) {
-                    rotateAndTranscribe(audioFile)
-                }
-                
-                val now = System.currentTimeMillis()
-                if (now - lastNoteTime > _config.value.notesIntervalMin * 60 * 1000L) {
-                    generateNote()
-                }
-                
-                if (now - lastFinalTime > _config.value.finalIntervalMin * 60 * 1000L) {
-                    generateFinal()
-                }
-            }
-        }
-    }
-
-    private suspend fun rotateAndTranscribe(audioFile: File) {
-        try {
-            mediaRecorder?.stop()
-            mediaRecorder?.release()
-            
-            val transcribeFile = File(getApplication<Application>().cacheDir, "chunk_${System.currentTimeMillis()}.webm")
-            if (audioFile.exists()) {
-                audioFile.renameTo(transcribeFile)
-            }
-            
-            val context = getApplication<Application>().applicationContext
-            if (_isRecording.value) {
-                mediaRecorder = if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.S) {
-                    MediaRecorder(context)
-                } else {
-                    @Suppress("DEPRECATION")
-                    MediaRecorder()
-                }.apply {
-                    setAudioSource(MediaRecorder.AudioSource.MIC)
-                    setOutputFormat(MediaRecorder.OutputFormat.WEBM)
-                    if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.Q) {
-                        setAudioEncoder(MediaRecorder.AudioEncoder.OPUS)
-                    } else {
-                        setAudioEncoder(MediaRecorder.AudioEncoder.AAC)
-                    }
-                    setOutputFile(audioFile.absolutePath)
-                    prepare()
-                    start()
-                }
-            }
-            
-            if (transcribeFile.exists()) {
-                transcribeChunk(transcribeFile)
-            }
-        } catch (e: Exception) {
-            Log.e("MainViewModel", "Error in rotateAndTranscribe", e)
-        }
-    }
-
-    private suspend fun transcribeChunk(file: File) {
-        val cfg = _config.value
-        val whisperUrl = if (cfg.syncApiSettings) cfg.llmUrl else cfg.whisperUrl
-        val whisperKey = if (cfg.syncApiSettings) cfg.llmApiKey else cfg.whisperApiKey
-        
-        if (whisperUrl.isBlank()) return
-
-        try {
-            val requestFile = file.asRequestBody("audio/webm".toMediaTypeOrNull())
-            val body = MultipartBody.Part.createFormData("file", file.name, requestFile)
-            val model = cfg.whisperModel.toRequestBody("text/plain".toMediaTypeOrNull())
-            val format = "json".toRequestBody("text/plain".toMediaTypeOrNull())
-            val auth = if (whisperKey.isNotBlank()) "Bearer $whisperKey" else null
-
-            val response = RetrofitClient.whisperApi.transcribe(
-                "$whisperUrl/v1/audio/transcriptions",
-                auth, body, model, format
-            )
-            
-            val text = response.text.trim()
-            if (text.isNotBlank()) {
-                _currentTranscript.value += (if (_currentTranscript.value.isEmpty()) "" else " ") + text
-                transcriptSinceLastNote += (if (transcriptSinceLastNote.isEmpty()) "" else " ") + text
-            }
-        } catch (e: Exception) {
-            Log.e("MainViewModel", "Transcription failed", e)
-        } finally {
-            if (file.exists()) file.delete()
-        }
-    }
-
-    private fun stopRecording() {
-        _isRecording.value = false
-        recordingJob?.cancel()
-        mediaRecorder?.apply {
-            try {
-                stop()
-            } catch (e: Exception) {}
-            release()
-        }
-        mediaRecorder = null
     }
 
     fun generateNote() {
-        if (_isUpdatingNotes.value || transcriptSinceLastNote.isBlank()) return
-        
         val cfg = _config.value
-        if (cfg.llmUrl.isBlank()) return
+        if (isRecording.value) {
+            getApplication<Application>().applicationContext.startService(
+                RecordingService.generateNoteIntent(getApplication())
+            )
+            return
+        }
 
-        _isUpdatingNotes.value = true
+        if (isUpdatingNotes.value || currentTranscript.value.isBlank()) return
+        if (!AiSessionClient.validateBaseUrl(cfg.llmUrl, cfg.allowInsecureHttp)) {
+            Toast.makeText(getApplication(), "Set a valid LLM URL. Enable insecure HTTP if you need http:// endpoints.", Toast.LENGTH_LONG).show()
+            return
+        }
+
+        ActiveSessionState.setUpdatingNotes(true)
         viewModelScope.launch {
             try {
-                val auth = if (cfg.llmApiKey.isNotBlank()) "Bearer ${cfg.llmApiKey}" else null
-                val prompt = cfg.notesPrompt
-                val content = "Transcript excerpt:\n\n$transcriptSinceLastNote"
-                
-                val response = RetrofitClient.llmApi.getCompletion(
-                    "${cfg.llmUrl}/v1/chat/completions",
-                    auth,
-                    LlmRequest(
-                        model = cfg.llmModel,
-                        messages = listOf(
-                            LlmMessage("system", prompt),
-                            LlmMessage("user", content)
-                        )
-                    )
-                )
-                
-                val note = response.choices.firstOrNull()?.message?.content?.trim()
+                val note = AiSessionClient.generateNote(cfg, currentTranscript.value)
                 if (!note.isNullOrBlank()) {
                     val time = SimpleDateFormat("HH:mm", Locale.getDefault()).format(Date())
-                    val entry = "— $time —\n$note"
-                    _currentNotes.value += (if (_currentNotes.value.isEmpty()) "" else "\n\n") + entry
-                    transcriptSinceLastNote = ""
-                    lastNoteTime = System.currentTimeMillis()
+                    ActiveSessionState.appendNote("-- $time --\n$note")
                 }
             } catch (e: Exception) {
                 Log.e("MainViewModel", "Note generation failed", e)
             } finally {
-                _isUpdatingNotes.value = false
+                ActiveSessionState.setUpdatingNotes(false)
             }
         }
     }
 
     fun generateFinal() {
-        if (_isGeneratingFinal.value || _currentNotes.value.isBlank()) return
-        
         val cfg = _config.value
-        if (cfg.llmUrl.isBlank()) return
+        if (isRecording.value) {
+            getApplication<Application>().applicationContext.startService(
+                RecordingService.generateFinalIntent(getApplication())
+            )
+            return
+        }
 
-        _isGeneratingFinal.value = true
+        if (isGeneratingFinal.value || currentNotes.value.isBlank()) return
+        if (!AiSessionClient.validateBaseUrl(cfg.llmUrl, cfg.allowInsecureHttp)) {
+            Toast.makeText(getApplication(), "Set a valid LLM URL. Enable insecure HTTP if you need http:// endpoints.", Toast.LENGTH_LONG).show()
+            return
+        }
+
+        ActiveSessionState.setGeneratingFinal(true)
         viewModelScope.launch {
             try {
-                val auth = if (cfg.llmApiKey.isNotBlank()) "Bearer ${cfg.llmApiKey}" else null
-                val prompt = cfg.finalPrompt
-                val content = "Full session notes:\n\n${_currentNotes.value}"
-                
-                val response = RetrofitClient.llmApi.getCompletion(
-                    "${cfg.llmUrl}/v1/chat/completions",
-                    auth,
-                    LlmRequest(
-                        model = cfg.llmModel,
-                        messages = listOf(
-                            LlmMessage("system", prompt),
-                            LlmMessage("user", content)
-                        )
-                    )
-                )
-                
-                val summary = response.choices.firstOrNull()?.message?.content?.trim()
+                val summary = AiSessionClient.generateFinal(cfg, currentNotes.value)
                 if (!summary.isNullOrBlank()) {
-                    _finalSummary.value = summary
-                    lastFinalTime = System.currentTimeMillis()
+                    ActiveSessionState.setFinalSummary(summary)
                 }
             } catch (e: Exception) {
                 Log.e("MainViewModel", "Final summary failed", e)
             } finally {
-                _isGeneratingFinal.value = false
+                ActiveSessionState.setGeneratingFinal(false)
             }
         }
     }
 
     fun saveCurrentSession() {
         viewModelScope.launch {
-            if (_currentTranscript.value.isBlank() && _currentNotes.value.isBlank()) return@launch
+            if (isRecording.value) {
+                Toast.makeText(getApplication(), "Stop recording before saving the session", Toast.LENGTH_SHORT).show()
+                return@launch
+            }
+
+            if (currentTranscript.value.isBlank() && currentNotes.value.isBlank()) return@launch
             val name = "Session - " + SimpleDateFormat("yyyy-MM-dd", Locale.getDefault()).format(Date())
             sessionRepository.insertSession(
                 SessionEntity(
                     name = name,
-                    fullTranscript = _currentTranscript.value,
-                    notes = _currentNotes.value,
-                    finalSummary = _finalSummary.value
+                    fullTranscript = currentTranscript.value,
+                    notes = currentNotes.value,
+                    finalSummary = finalSummary.value
                 )
             )
             clearActiveSession()
@@ -331,10 +159,7 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
     }
 
     fun clearActiveSession() {
-        _currentTranscript.value = ""
-        _currentNotes.value = ""
-        _finalSummary.value = ""
-        transcriptSinceLastNote = ""
+        ActiveSessionState.clear()
     }
     
     fun updateConfig(newConfig: AppConfig) {
@@ -346,7 +171,7 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
     }
 
     fun updateNotes(newNotes: String) {
-        _currentNotes.value = newNotes
+        ActiveSessionState.updateNotes(newNotes)
     }
 
     fun deleteSession(session: SessionEntity) {
@@ -356,16 +181,21 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
     }
 
     fun loadSession(session: SessionEntity) {
-        _currentTranscript.value = session.fullTranscript
-        _currentNotes.value = session.notes
-        _finalSummary.value = session.finalSummary
-        transcriptSinceLastNote = ""
+        if (isRecording.value) {
+            Toast.makeText(getApplication(), "Stop recording before loading an archived session", Toast.LENGTH_SHORT).show()
+            return
+        }
+        ActiveSessionState.load(session)
     }
 
     fun exportArchives(context: Context) {
         viewModelScope.launch {
             try {
-                val sessions = allSessions.first()
+                val sessions = allSessions.firstOrNull() ?: emptyList()
+                if (sessions.isEmpty()) {
+                    Toast.makeText(context, "No sessions to export", Toast.LENGTH_SHORT).show()
+                    return@launch
+                }
                 val json = gson.toJson(sessions)
                 
                 val sendIntent: Intent = Intent().apply {
@@ -379,6 +209,7 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
                 context.startActivity(shareIntent)
             } catch (e: Exception) {
                 Log.e("MainViewModel", "Export failed", e)
+                Toast.makeText(context, "Export failed: ${e.message}", Toast.LENGTH_SHORT).show()
             }
         }
     }
@@ -393,9 +224,11 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
                     importedSessions.forEach { session ->
                         sessionRepository.insertSession(session.copy(id = 0))
                     }
+                    Toast.makeText(context, "Imported ${importedSessions.size} sessions", Toast.LENGTH_SHORT).show()
                 }
             } catch (e: Exception) {
                 Log.e("MainViewModel", "Import failed", e)
+                Toast.makeText(context, "Import failed: ${e.message}", Toast.LENGTH_SHORT).show()
             }
         }
     }
