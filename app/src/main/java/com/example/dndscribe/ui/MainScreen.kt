@@ -44,6 +44,23 @@ fun MainScreen(viewModel: MainViewModel = viewModel()) {
                     IconButton(onClick = { viewModel.saveCurrentSession() }, enabled = !isRecording) {
                         Icon(Icons.Default.Save, contentDescription = "Save", tint = Gold)
                     }
+                    if (selectedTab == 1) {
+                        IconButton(onClick = { viewModel.generateNote() }) {
+                            Icon(Icons.Default.NoteAdd, contentDescription = "Add note now", tint = Gold)
+                        }
+                    }
+                    if (selectedTab == 2) {
+                        IconButton(onClick = { viewModel.generateFinal() }) {
+                            Icon(Icons.Default.AutoAwesome, contentDescription = "Generate final summary", tint = Gold)
+                        }
+                    }
+                    IconButton(onClick = { viewModel.toggleRecording() }) {
+                        Icon(
+                            if (isRecording) Icons.Default.Stop else Icons.Default.Mic,
+                            contentDescription = if (isRecording) "Stop recording" else "Start recording",
+                            tint = if (isRecording) Color.Red else Gold
+                        )
+                    }
                     IconButton(onClick = { showSettings = true }) {
                         Icon(Icons.Default.Settings, contentDescription = "Settings", tint = Gold)
                     }
@@ -51,29 +68,23 @@ fun MainScreen(viewModel: MainViewModel = viewModel()) {
                 colors = TopAppBarDefaults.centerAlignedTopAppBarColors(containerColor = Ink)
             )
         },
-        floatingActionButton = {
-            Column(horizontalAlignment = Alignment.End) {
-                if (isRecording) {
-                    Text(
-                        "RECORDING",
-                        color = Color.Red,
-                        fontWeight = FontWeight.Bold,
-                        fontSize = 12.sp,
-                        modifier = Modifier.padding(bottom = 8.dp)
-                    )
-                }
-                FloatingActionButton(
-                    onClick = { viewModel.toggleRecording() },
-                    containerColor = if (isRecording) Color.Red else Gold,
-                    contentColor = Ink
-                ) {
-                    Icon(if (isRecording) Icons.Default.Stop else Icons.Default.Mic, contentDescription = "Record")
-                }
-            }
-        },
         containerColor = Ink
     ) { padding ->
-        Column(modifier = Modifier.padding(padding)) {
+        Column(
+            modifier = Modifier
+                .fillMaxSize()
+                .padding(padding)
+        ) {
+            if (isRecording) {
+                Text(
+                    "RECORDING",
+                    color = Color.Red,
+                    fontWeight = FontWeight.Bold,
+                    fontSize = 12.sp,
+                    modifier = Modifier.padding(horizontal = 16.dp, vertical = 8.dp)
+                )
+            }
+
             TabRow(
                 selectedTabIndex = selectedTab,
                 containerColor = Color.Black,
@@ -94,7 +105,12 @@ fun MainScreen(viewModel: MainViewModel = viewModel()) {
                 }
             }
 
-            Box(modifier = Modifier.fillMaxSize().background(Parchment)) {
+            Box(
+                modifier = Modifier
+                    .weight(1f)
+                    .fillMaxWidth()
+                    .background(Parchment)
+            ) {
                 when (selectedTab) {
                     0 -> TranscriptPane(viewModel)
                     1 -> NotesPane(viewModel)
@@ -113,37 +129,41 @@ fun MainScreen(viewModel: MainViewModel = viewModel()) {
 @Composable
 fun TranscriptPane(viewModel: MainViewModel) {
     val transcript by viewModel.currentTranscript.collectAsState()
-    LazyColumn(modifier = Modifier.fillMaxSize().padding(16.dp)) {
-        item {
-            SelectionContainer {
-                Text(transcript, color = Ink, lineHeight = 24.sp)
-            }
-        }
-    }
+    OutlinedTextField(
+        value = transcript,
+        onValueChange = { viewModel.updateTranscript(it) },
+        modifier = Modifier
+            .fillMaxSize()
+            .padding(8.dp),
+        colors = OutlinedTextFieldDefaults.colors(
+            focusedBorderColor = Color.Transparent,
+            unfocusedBorderColor = Color.Transparent,
+            focusedTextColor = Ink,
+            unfocusedTextColor = Ink
+        ),
+        maxLines = Int.MAX_VALUE,
+        placeholder = { Text("Transcript will appear here...") }
+    )
 }
 
 @Composable
 fun NotesPane(viewModel: MainViewModel) {
     val notes by viewModel.currentNotes.collectAsState()
-    Column {
-        Row(
-            modifier = Modifier.fillMaxWidth().padding(8.dp),
-            horizontalArrangement = Arrangement.End
-        ) {
-            Button(onClick = { viewModel.generateNote() }, colors = ButtonDefaults.buttonColors(containerColor = Gold)) {
-                Text("Add Note Now", color = Ink)
-            }
-        }
+    Column(modifier = Modifier.fillMaxSize()) {
         OutlinedTextField(
             value = notes,
             onValueChange = { viewModel.updateNotes(it) },
-            modifier = Modifier.fillMaxSize().padding(8.dp),
+            modifier = Modifier
+                .weight(1f)
+                .fillMaxWidth()
+                .padding(8.dp),
             colors = OutlinedTextFieldDefaults.colors(
                 focusedBorderColor = Color.Transparent,
                 unfocusedBorderColor = Color.Transparent,
                 focusedTextColor = Ink,
                 unfocusedTextColor = Ink
             ),
+            maxLines = Int.MAX_VALUE,
             placeholder = { Text("Running notes will appear here...") }
         )
     }
@@ -153,28 +173,27 @@ fun NotesPane(viewModel: MainViewModel) {
 fun FinalPane(viewModel: MainViewModel) {
     val summary by viewModel.finalSummary.collectAsState()
     val isGenerating by viewModel.isGeneratingFinal.collectAsState()
-    
-    Column {
-        Row(
-            modifier = Modifier.fillMaxWidth().padding(8.dp),
-            horizontalArrangement = Arrangement.End
-        ) {
-            Button(
-                onClick = { viewModel.generateFinal() },
-                enabled = !isGenerating,
-                colors = ButtonDefaults.buttonColors(containerColor = Gold)
-            ) {
-                Text(if (isGenerating) "Consulting the sands..." else "Generate Now", color = Ink)
-            }
+
+    OutlinedTextField(
+        value = summary,
+        onValueChange = { viewModel.updateFinalSummary(it) },
+        modifier = Modifier
+            .fillMaxSize()
+            .padding(8.dp),
+        enabled = !isGenerating,
+        colors = OutlinedTextFieldDefaults.colors(
+            focusedBorderColor = Color.Transparent,
+            unfocusedBorderColor = Color.Transparent,
+            focusedTextColor = Ink,
+            unfocusedTextColor = Ink,
+            disabledBorderColor = Color.Transparent,
+            disabledTextColor = Ink
+        ),
+        maxLines = Int.MAX_VALUE,
+        placeholder = {
+            Text(if (isGenerating) "Consulting the sands..." else "Final summary will appear here...")
         }
-        SelectionContainer {
-            LazyColumn(modifier = Modifier.fillMaxSize().padding(16.dp)) {
-                item {
-                    Text(summary, color = Ink, lineHeight = 24.sp)
-                }
-            }
-        }
-    }
+    )
 }
 
 @Composable

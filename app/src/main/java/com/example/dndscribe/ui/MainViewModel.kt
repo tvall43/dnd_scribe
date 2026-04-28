@@ -190,6 +190,20 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
         }
     }
 
+    fun updateTranscript(newTranscript: String) {
+        ActiveSessionState.updateTranscript(newTranscript)
+        viewModelScope.launch {
+            persistActiveSessionContent()
+        }
+    }
+
+    fun updateFinalSummary(newSummary: String) {
+        ActiveSessionState.updateFinalSummary(newSummary)
+        viewModelScope.launch {
+            persistActiveSessionContent()
+        }
+    }
+
     fun deleteSession(session: SessionEntity) {
         viewModelScope.launch {
             sessionRepository.deleteSession(session)

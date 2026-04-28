@@ -17,7 +17,7 @@ interface LlmApi {
 data class LlmRequest(
     val model: String,
     val messages: List<LlmMessage>,
-    val max_tokens: Int = 1000
+    val max_tokens: Int? = null
 )
 
 data class LlmMessage(

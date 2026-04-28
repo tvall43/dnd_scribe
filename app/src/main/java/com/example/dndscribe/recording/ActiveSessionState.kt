@@ -41,6 +41,14 @@ object ActiveSessionState {
         _currentNotes.value = notes
     }
 
+    fun updateTranscript(transcript: String) {
+        _currentTranscript.value = transcript
+    }
+
+    fun updateFinalSummary(summary: String) {
+        _finalSummary.value = summary
+    }
+
     fun setFinalSummary(summary: String) {
         _finalSummary.value = summary
     }
