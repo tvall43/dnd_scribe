@@ -34,8 +34,12 @@ object AiSessionClient {
         return RetrofitClient.whisperApi.transcribe(endpoint, auth, body, model, format).text.trim()
     }
 
-    suspend fun generateNote(config: AppConfig, transcript: String): String? {
-        val content = "Transcript excerpt:\n\n$transcript"
+    suspend fun generateNote(config: AppConfig, transcript: String, previousNotes: String? = null): String? {
+        val content = if (!previousNotes.isNullOrBlank()) {
+            "Previous running notes:\n\n$previousNotes\n\nNew transcript excerpt:\n\n$transcript"
+        } else {
+            "Transcript excerpt:\n\n$transcript"
+        }
         return getCompletion(config, config.notesPrompt, content)
     }
 

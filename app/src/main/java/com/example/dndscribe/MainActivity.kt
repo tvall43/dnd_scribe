@@ -10,7 +10,6 @@ import androidx.compose.foundation.layout.fillMaxSize
 import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.Surface
 import androidx.compose.ui.Modifier
-import androidx.core.view.WindowCompat
 import com.example.dndscribe.ui.MainScreen
 import com.example.dndscribe.ui.theme.DnDScribeTheme
 
@@ -25,9 +24,6 @@ class MainActivity : ComponentActivity() {
 
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
-        
-        // Handle keyboard resizing properly in Compose
-        WindowCompat.setDecorFitsSystemWindows(window, false)
 
         requestPermissionLauncher.launch(Manifest.permission.RECORD_AUDIO)
 

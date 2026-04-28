@@ -129,20 +129,26 @@ fun MainScreen(viewModel: MainViewModel = viewModel()) {
 @Composable
 fun TranscriptPane(viewModel: MainViewModel) {
     val transcript by viewModel.currentTranscript.collectAsState()
+    val isRecording by viewModel.isRecording.collectAsState()
     OutlinedTextField(
         value = transcript,
         onValueChange = { viewModel.updateTranscript(it) },
         modifier = Modifier
             .fillMaxSize()
             .padding(8.dp),
+        enabled = !isRecording,
         colors = OutlinedTextFieldDefaults.colors(
             focusedBorderColor = Color.Transparent,
             unfocusedBorderColor = Color.Transparent,
             focusedTextColor = Ink,
-            unfocusedTextColor = Ink
+            unfocusedTextColor = Ink,
+            disabledBorderColor = Color.Transparent,
+            disabledTextColor = Ink
         ),
         maxLines = Int.MAX_VALUE,
-        placeholder = { Text("Transcript will appear here...") }
+        placeholder = {
+            Text(if (isRecording) "Transcript is locked while recording..." else "Transcript will appear here...")
+        }
     )
 }
 
@@ -173,6 +179,7 @@ fun NotesPane(viewModel: MainViewModel) {
 fun FinalPane(viewModel: MainViewModel) {
     val summary by viewModel.finalSummary.collectAsState()
     val isGenerating by viewModel.isGeneratingFinal.collectAsState()
+    val isRecording by viewModel.isRecording.collectAsState()
 
     OutlinedTextField(
         value = summary,
@@ -180,7 +187,7 @@ fun FinalPane(viewModel: MainViewModel) {
         modifier = Modifier
             .fillMaxSize()
             .padding(8.dp),
-        enabled = !isGenerating,
+        enabled = !isGenerating && !isRecording,
         colors = OutlinedTextFieldDefaults.colors(
             focusedBorderColor = Color.Transparent,
             unfocusedBorderColor = Color.Transparent,
@@ -191,7 +198,13 @@ fun FinalPane(viewModel: MainViewModel) {
         ),
         maxLines = Int.MAX_VALUE,
         placeholder = {
-            Text(if (isGenerating) "Consulting the sands..." else "Final summary will appear here...")
+            Text(
+                when {
+                    isGenerating -> "Consulting the sands..."
+                    isRecording -> "Final summary is locked while recording..."
+                    else -> "Final summary will appear here..."
+                }
+            )
         }
     )
 }
@@ -338,6 +351,29 @@ fun SettingsDialog(viewModel: MainViewModel, onDismiss: () -> Unit) {
                     TextField(value = config.chunkSec.toString(), onValueChange = { viewModel.updateConfig(config.copy(chunkSec = it.toIntOrNull() ?: 15)) }, label = { Text("Chunk (sec)") })
                     TextField(value = config.notesIntervalMin.toString(), onValueChange = { viewModel.updateConfig(config.copy(notesIntervalMin = it.toIntOrNull() ?: 10)) }, label = { Text("Notes (min)") })
                     TextField(value = config.finalIntervalMin.toString(), onValueChange = { viewModel.updateConfig(config.copy(finalIntervalMin = it.toIntOrNull() ?: 120)) }, label = { Text("Final (min)") })
+
+                    Spacer(modifier = Modifier.height(16.dp))
+                    Text("Note Context", fontWeight = FontWeight.Bold)
+                    Row(verticalAlignment = Alignment.CenterVertically) {
+                        Checkbox(
+                            checked = config.includePreviousNotesContext,
+                            onCheckedChange = {
+                                viewModel.updateConfig(config.copy(includePreviousNotesContext = it))
+                            }
+                        )
+                        Text("Include previous notes with new transcript")
+                    }
+                    if (config.includePreviousNotesContext) {
+                        TextField(
+                            value = config.previousNotesContextCount.toString(),
+                            onValueChange = {
+                                viewModel.updateConfig(
+                                    config.copy(previousNotesContextCount = it.toIntOrNull()?.coerceAtLeast(1) ?: 1)
+                                )
+                            },
+                            label = { Text("Previous note entries") }
+                        )
+                    }
                 }
             }
         },

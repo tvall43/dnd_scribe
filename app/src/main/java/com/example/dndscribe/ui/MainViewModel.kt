@@ -102,7 +102,11 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
         ActiveSessionState.setUpdatingNotes(true)
         viewModelScope.launch {
             try {
-                val note = AiSessionClient.generateNote(cfg, currentTranscript.value)
+                val note = AiSessionClient.generateNote(
+                    cfg,
+                    currentTranscript.value,
+                    previousNotes = extractPreviousNotesContext(currentNotes.value, cfg)
+                )
                 if (!note.isNullOrBlank()) {
                     val time = SimpleDateFormat("HH:mm", Locale.getDefault()).format(Date())
                     ActiveSessionState.appendNote("-- $time --\n$note")
@@ -155,7 +159,7 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
             }
 
             if (currentTranscript.value.isBlank() && currentNotes.value.isBlank()) return@launch
-            val name = "Session - " + SimpleDateFormat("yyyy-MM-dd", Locale.getDefault()).format(Date())
+            val name = "Session - " + SimpleDateFormat("yyyy-MM-dd HH:mm", Locale.getDefault()).format(Date())
             sessionRepository.insertSession(
                 SessionEntity(
                     name = name,
@@ -191,6 +195,7 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
     }
 
     fun updateTranscript(newTranscript: String) {
+        if (isRecording.value) return
         ActiveSessionState.updateTranscript(newTranscript)
         viewModelScope.launch {
             persistActiveSessionContent()
@@ -198,6 +203,7 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
     }
 
     fun updateFinalSummary(newSummary: String) {
+        if (isRecording.value) return
         ActiveSessionState.updateFinalSummary(newSummary)
         viewModelScope.launch {
             persistActiveSessionContent()
@@ -234,7 +240,12 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
                 if (!exportDir.exists()) {
                     exportDir.mkdirs()
                 }
-                val fileName = "dnd-scribe-archives-${SimpleDateFormat("yyyyMMdd-HHmmss", Locale.US).format(Date())}.json"
+                exportDir.listFiles()?.forEach { existingFile ->
+                    if (existingFile.isFile) {
+                        existingFile.delete()
+                    }
+                }
+                val fileName = "dnd-scribe-archives.json"
                 val exportFile = File(exportDir, fileName)
                 exportFile.writeText(json)
                 val uri = FileProvider.getUriForFile(
@@ -267,10 +278,25 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
                 if (json != null) {
                     val type = object : TypeToken<List<SessionEntity>>() {}.type
                     val importedSessions: List<SessionEntity> = gson.fromJson(json, type)
-                    importedSessions.forEach { session ->
-                        sessionRepository.insertSession(session.copy(id = 0))
+                    val existingSessions = allSessions.firstOrNull().orEmpty()
+                    val existingKeys = existingSessions.mapTo(mutableSetOf()) { session ->
+                        listOf(session.name, session.date.toString(), session.fullTranscript, session.notes, session.finalSummary)
                     }
-                    Toast.makeText(context, "Imported ${importedSessions.size} sessions", Toast.LENGTH_SHORT).show()
+                    var insertedCount = 0
+                    importedSessions.forEach { session ->
+                        val sessionKey = listOf(
+                            session.name,
+                            session.date.toString(),
+                            session.fullTranscript,
+                            session.notes,
+                            session.finalSummary
+                        )
+                        if (existingKeys.add(sessionKey)) {
+                            sessionRepository.insertSession(session.copy(id = 0))
+                            insertedCount += 1
+                        }
+                    }
+                    Toast.makeText(context, "Imported $insertedCount new sessions", Toast.LENGTH_SHORT).show()
                 }
             } catch (e: Exception) {
                 Log.e("MainViewModel", "Import failed", e)
@@ -285,5 +311,15 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
             notes = currentNotes.value,
             finalSummary = finalSummary.value
         )
+    }
+
+    private fun extractPreviousNotesContext(notes: String, config: AppConfig): String? {
+        if (!config.includePreviousNotesContext) return null
+        val trimmedNotes = notes.trim()
+        if (trimmedNotes.isBlank()) return null
+
+        val count = config.previousNotesContextCount.coerceAtLeast(1)
+        val entries = trimmedNotes.split("\n\n").filter { it.isNotBlank() }
+        return entries.takeLast(count).joinToString("\n\n").takeIf { it.isNotBlank() }
     }
 }

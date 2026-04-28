@@ -23,6 +23,8 @@ data class AppConfig(
     val chunkSec: Int = 15,
     val notesIntervalMin: Int = 10,
     val finalIntervalMin: Int = 120,
+    val includePreviousNotesContext: Boolean = false,
+    val previousNotesContextCount: Int = 1,
     val notesPrompt: String = "You are a D&D session scribe. Given the transcript excerpt below, write a short paragraph (4-6 sentences) summarizing what just happened. Focus on: what the party did, any NPCs they interacted with, decisions made, and anything discovered. Write in past tense. Be concise — this is a running log entry, not a full summary.",
     val finalPrompt: String = "You are a meticulous D&D session scribe. Given the session notes below, produce structured session summary:\n\n## Session Summary\nA 2-3 sentence narrative overview.\n\n## Key Events\n- Bullet list of major plot moments in order.\n\n## NPCs Encountered\n- Name: brief description / role / attitude\n\n## Decisions Made\n- Notable choices the party made\n\n## Loot & Discoveries\n- Items found, secrets uncovered, locations revealed\n\n## Threads & Hooks\n- Unresolved threads or hooks for next session\n\nKeep it concise but complete. Write in past tense."
 )
@@ -40,6 +42,8 @@ class SettingsRepository(private val context: Context) {
         val CHUNK_SEC = intPreferencesKey("chunk_sec")
         val NOTES_INTERVAL = intPreferencesKey("notes_interval")
         val FINAL_INTERVAL = intPreferencesKey("final_interval")
+        val INCLUDE_PREVIOUS_NOTES_CONTEXT = booleanPreferencesKey("include_previous_notes_context")
+        val PREVIOUS_NOTES_CONTEXT_COUNT = intPreferencesKey("previous_notes_context_count")
         val NOTES_PROMPT = stringPreferencesKey("notes_prompt")
         val FINAL_PROMPT = stringPreferencesKey("final_prompt")
     }
@@ -65,6 +69,8 @@ class SettingsRepository(private val context: Context) {
                 chunkSec = preferences[Keys.CHUNK_SEC] ?: 15,
                 notesIntervalMin = preferences[Keys.NOTES_INTERVAL] ?: 10,
                 finalIntervalMin = preferences[Keys.FINAL_INTERVAL] ?: 120,
+                includePreviousNotesContext = preferences[Keys.INCLUDE_PREVIOUS_NOTES_CONTEXT] ?: false,
+                previousNotesContextCount = preferences[Keys.PREVIOUS_NOTES_CONTEXT_COUNT] ?: 1,
                 notesPrompt = preferences[Keys.NOTES_PROMPT] ?: AppConfig().notesPrompt,
                 finalPrompt = preferences[Keys.FINAL_PROMPT] ?: AppConfig().finalPrompt
             )
@@ -83,6 +89,8 @@ class SettingsRepository(private val context: Context) {
             preferences[Keys.CHUNK_SEC] = config.chunkSec
             preferences[Keys.NOTES_INTERVAL] = config.notesIntervalMin
             preferences[Keys.FINAL_INTERVAL] = config.finalIntervalMin
+            preferences[Keys.INCLUDE_PREVIOUS_NOTES_CONTEXT] = config.includePreviousNotesContext
+            preferences[Keys.PREVIOUS_NOTES_CONTEXT_COUNT] = config.previousNotesContextCount
             preferences[Keys.NOTES_PROMPT] = config.notesPrompt
             preferences[Keys.FINAL_PROMPT] = config.finalPrompt
         }

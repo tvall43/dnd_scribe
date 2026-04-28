@@ -189,7 +189,11 @@ class RecordingService : Service() {
 
         ActiveSessionState.setUpdatingNotes(true)
         try {
-            val note = AiSessionClient.generateNote(currentConfig, transcriptSinceLastNote)
+            val note = AiSessionClient.generateNote(
+                currentConfig,
+                transcriptSinceLastNote,
+                previousNotes = extractPreviousNotesContext()
+            )
             if (!note.isNullOrBlank()) {
                 val time = SimpleDateFormat("HH:mm", Locale.getDefault()).format(Date())
                 ActiveSessionState.appendNote("-- $time --\n$note")
@@ -316,6 +320,17 @@ class RecordingService : Service() {
                 lastFinalTime = lastFinalTime
             )
         )
+    }
+
+    private fun extractPreviousNotesContext(): String? {
+        if (!currentConfig.includePreviousNotesContext) return null
+
+        val notes = ActiveSessionState.currentNotes.value.trim()
+        if (notes.isBlank()) return null
+
+        val count = currentConfig.previousNotesContextCount.coerceAtLeast(1)
+        val entries = notes.split("\n\n").filter { it.isNotBlank() }
+        return entries.takeLast(count).joinToString("\n\n").takeIf { it.isNotBlank() }
     }
 
     private suspend fun restorePersistedSession() {
