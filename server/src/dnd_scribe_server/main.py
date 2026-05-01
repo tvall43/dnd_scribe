@@ -1,16 +1,27 @@
 from __future__ import annotations
 
 import html
+import os
 import time
 
-from fastapi import Depends, FastAPI, HTTPException, Query, Request
+from fastapi import Depends, FastAPI, Form, HTTPException, Query, Request
 from fastapi.responses import HTMLResponse, RedirectResponse
 
-from .auth import require_bearer_token
+from .auth import UI_AUTH_COOKIE, require_bearer_token
 from .schemas import SessionCreate, SessionListItem, SessionRecord, SyncRequest, SyncResult
 from .storage import db, initialize_database
 
 app = FastAPI(title="DnD Scribe Server", version="0.1.0")
+
+
+def _base_path() -> str:
+    raw = os.environ.get("DND_SCRIBE_BASE_PATH", "").strip()
+    if not raw:
+        return ""
+    return "/" + raw.strip("/")
+
+
+BASE_PATH = _base_path()
 
 
 @app.on_event("startup")
@@ -41,6 +52,39 @@ def _html_escape(text: str | None) -> str:
     return html.escape(text or "")
 
 
+def _ui_path(path: str) -> str:
+    if not path.startswith("/"):
+        path = "/" + path
+    return f"{BASE_PATH}{path}" if BASE_PATH else path
+
+
+def _ui_expected_token() -> str:
+    return os.environ.get("DND_SCRIBE_AUTH_TOKEN", "")
+
+
+def _ui_is_authenticated(request: Request) -> bool:
+    expected = _ui_expected_token()
+    if not expected:
+        return True
+    return request.cookies.get(UI_AUTH_COOKIE) == expected
+
+
+def _ui_login_page(next_path: str = "/", message: str = "") -> HTMLResponse:
+    body = f'''
+<h1>DnD Scribe</h1>
+<div class="card">
+  <form method="post" action="{_ui_path('/ui/login')}">
+    <input type="hidden" name="next" value="{_html_escape(next_path)}" />
+    <label>Access token</label>
+    <input name="token" type="password" autofocus placeholder="Bearer token" />
+    <button type="submit">Log in</button>
+  </form>
+  {'<p class="danger">' + _html_escape(message) + '</p>' if message else ''}
+</div>
+'''
+    return _render_page("DnD Scribe Login", body)
+
+
 def _render_page(title: str, body: str) -> HTMLResponse:
     return HTMLResponse(
         f"""<!doctype html>
@@ -69,6 +113,12 @@ def _render_page(title: str, body: str) -> HTMLResponse:
 {body}
 <script>
 const tokenKey = 'dnd_scribe_token';
+const basePath = {BASE_PATH!r};
+
+function uiPath(path) {{
+  if (!path.startsWith('/')) path = '/' + path;
+  return basePath ? `${{basePath}}${{path}}` : path;
+}}
 
 function getToken() {{
   return localStorage.getItem(tokenKey) || '';
@@ -90,12 +140,12 @@ async function apiFetch(url, options = {{}}) {{
 
 async function deleteSession(sessionId) {{
   if (!confirm('Delete this session?')) return;
-  const response = await apiFetch(`/sessions/${{encodeURIComponent(sessionId)}}`, {{ method: 'DELETE' }});
+  const response = await apiFetch(uiPath(`/sessions/${{encodeURIComponent(sessionId)}}`), {{ method: 'DELETE' }});
   if (!response.ok) {{
     alert(await response.text());
     return;
   }}
-  window.location.href = '/';
+  window.location.href = uiPath('/');
 }}
 
 function installTokenInputs() {{
@@ -117,8 +167,37 @@ def health() -> dict[str, str]:
     return {"status": "ok"}
 
 
+@app.get("/ui/login", response_class=HTMLResponse)
+def ui_login_page(request: Request, next: str = "/") -> HTMLResponse:
+    if _ui_is_authenticated(request):
+        return RedirectResponse(url=_ui_path(next), status_code=303)
+    return _ui_login_page(next_path=next)
+
+
+@app.post("/ui/login")
+def ui_login(token: str = Form(...), next: str = Form("/")) -> RedirectResponse:
+    expected = _ui_expected_token()
+    if expected and token != expected:
+        return _ui_login_page(next_path=next, message="Invalid token")
+
+    response = RedirectResponse(url=_ui_path(next), status_code=303)
+    if expected:
+        response.set_cookie(
+            UI_AUTH_COOKIE,
+            expected,
+            httponly=True,
+            samesite="lax",
+            secure=False,
+            path=BASE_PATH or "/",
+        )
+    return response
+
+
 @app.get("/", response_class=HTMLResponse)
 def index(request: Request, q: str = "") -> HTMLResponse:
+    if not _ui_is_authenticated(request):
+        return _ui_login_page(next_path=_ui_path("/"))
+
     with db() as conn:
         if q.strip():
             pattern = f"%{q}%"
@@ -140,7 +219,7 @@ def index(request: Request, q: str = "") -> HTMLResponse:
     for row in rows:
         items.append(
             f'''<div class="list-item">
-  <div><a href="/ui/sessions/{row["id"]}"><strong>{_html_escape(row["name"])}</strong></a></div>
+  <div><a href="{_ui_path(f'/ui/sessions/{row["id"]}')}" ><strong>{_html_escape(row["name"])}</strong></a></div>
   <div class="muted small">{row["id"]} · {row["session_date"]}</div>
   <div class="small">{_html_escape(_preview(row["final_summary"] or row["notes"] or row["full_transcript"]))}</div>
 </div>'''
@@ -158,7 +237,7 @@ def index(request: Request, q: str = "") -> HTMLResponse:
   </div>
 </div>
 <div class="card">
-  <form method="get" action="/">
+  <form method="get" action="{_ui_path('/')}">
     <label>Search</label>
     <input name="q" value="{_html_escape(q)}" placeholder="Search sessions" />
     <button type="submit">Search</button>
@@ -173,14 +252,17 @@ def index(request: Request, q: str = "") -> HTMLResponse:
 
 
 @app.get("/ui/sessions/{session_id}", response_class=HTMLResponse)
-def session_page(session_id: str) -> HTMLResponse:
+def session_page(request: Request, session_id: str) -> HTMLResponse:
+    if not _ui_is_authenticated(request):
+        return _ui_login_page(next_path=_ui_path(f"/ui/sessions/{session_id}"))
+
     with db() as conn:
         row = conn.execute("SELECT * FROM sessions WHERE id = ?", (session_id,)).fetchone()
     if row is None:
         raise HTTPException(status_code=404, detail="Session not found")
 
     body = f'''
-<p><a href="/">&larr; Back</a></p>
+<p><a href="{_ui_path('/')}">&larr; Back</a></p>
 <h1>{_html_escape(row["name"])}</h1>
 <div class="card">
   <label>Auth token</label>
@@ -332,4 +414,4 @@ def delete_via_form(session_id: str, request: Request) -> RedirectResponse:
         result = conn.execute("DELETE FROM sessions WHERE id = ?", (session_id,))
         if result.rowcount == 0:
             raise HTTPException(status_code=404, detail="Session not found")
-    return RedirectResponse(url="/", status_code=303)
+    return RedirectResponse(url=_ui_path("/"), status_code=303)
