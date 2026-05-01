@@ -308,6 +308,7 @@ fun SessionDetailView(session: com.example.dndscribe.data.local.SessionEntity, o
 @Composable
 fun SettingsDialog(viewModel: MainViewModel, onDismiss: () -> Unit) {
     val config by viewModel.config.collectAsState()
+    val context = LocalContext.current
     
     AlertDialog(
         onDismissRequest = onDismiss,
@@ -373,6 +374,40 @@ fun SettingsDialog(viewModel: MainViewModel, onDismiss: () -> Unit) {
                             },
                             label = { Text("Previous note entries") }
                         )
+                    }
+
+                    Spacer(modifier = Modifier.height(16.dp))
+                    Text("Cloud Backup", fontWeight = FontWeight.Bold)
+                    Row(verticalAlignment = Alignment.CenterVertically) {
+                        Checkbox(
+                            checked = config.cloudBackupEnabled,
+                            onCheckedChange = { viewModel.updateConfig(config.copy(cloudBackupEnabled = it)) }
+                        )
+                        Text("Sync sessions to server")
+                    }
+                    if (config.cloudBackupEnabled) {
+                        TextField(
+                            value = config.cloudUrl,
+                            onValueChange = { viewModel.updateConfig(config.copy(cloudUrl = it)) },
+                            label = { Text("Cloud Base URL") }
+                        )
+                        TextField(
+                            value = config.cloudApiKey,
+                            onValueChange = { viewModel.updateConfig(config.copy(cloudApiKey = it)) },
+                            label = { Text("Cloud API Key") }
+                        )
+                        TextField(
+                            value = config.cloudDeviceId,
+                            onValueChange = { viewModel.updateConfig(config.copy(cloudDeviceId = it.ifBlank { "android" })) },
+                            label = { Text("Cloud Device ID") }
+                        )
+                        Button(
+                            onClick = { viewModel.syncNow(context) },
+                            colors = ButtonDefaults.buttonColors(containerColor = Gold),
+                            modifier = Modifier.padding(top = 8.dp)
+                        ) {
+                            Text("Sync Now", color = Ink)
+                        }
                     }
                 }
             }

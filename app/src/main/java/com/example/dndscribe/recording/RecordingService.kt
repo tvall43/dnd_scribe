@@ -19,6 +19,7 @@ import com.example.dndscribe.data.remote.AiSessionClient
 import com.example.dndscribe.data.repository.ActiveSessionRepository
 import com.example.dndscribe.data.repository.ActiveSessionSnapshot
 import com.example.dndscribe.data.repository.AppConfig
+import com.example.dndscribe.data.repository.CloudSyncRepository
 import com.example.dndscribe.data.repository.SettingsRepository
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Dispatchers
@@ -38,6 +39,7 @@ class RecordingService : Service() {
     private val serviceScope = CoroutineScope(SupervisorJob() + Dispatchers.Main.immediate)
     private val settingsRepository by lazy { SettingsRepository(applicationContext) }
     private val activeSessionRepository by lazy { ActiveSessionRepository(applicationContext) }
+    private val cloudSyncRepository = CloudSyncRepository()
 
     private var currentConfig = AppConfig()
     private var mediaRecorder: MediaRecorder? = null
@@ -45,6 +47,8 @@ class RecordingService : Service() {
     private var transcriptSinceLastNote = ""
     private var lastNoteTime = System.currentTimeMillis()
     private var lastFinalTime = System.currentTimeMillis()
+    private var sessionStartedAt = 0L
+    private var lastCloudSyncTime = 0L
 
     override fun onCreate() {
         super.onCreate()
@@ -98,6 +102,9 @@ class RecordingService : Service() {
             if (lastFinalTime == 0L) {
                 lastFinalTime = System.currentTimeMillis()
             }
+            if (sessionStartedAt == 0L) {
+                sessionStartedAt = System.currentTimeMillis()
+            }
             persistActiveSession()
             startRecordingLoop(audioFile)
         } catch (e: Exception) {
@@ -125,6 +132,9 @@ class RecordingService : Service() {
                 if (now - lastFinalTime > currentConfig.finalIntervalMin * 60 * 1000L) {
                     generateFinal()
                 }
+                if (now - lastCloudSyncTime > CLOUD_SYNC_INTERVAL_MS) {
+                    syncActiveSessionToCloud()
+                }
             }
         }
     }
@@ -147,6 +157,7 @@ class RecordingService : Service() {
         }
 
         persistActiveSession()
+        syncActiveSessionToCloud()
 
         stopForeground(STOP_FOREGROUND_REMOVE)
         stopSelf()
@@ -317,9 +328,29 @@ class RecordingService : Service() {
                 finalSummary = ActiveSessionState.finalSummary.value,
                 transcriptSinceLastNote = transcriptSinceLastNote,
                 lastNoteTime = lastNoteTime,
-                lastFinalTime = lastFinalTime
+                lastFinalTime = lastFinalTime,
+                sessionStartedAt = sessionStartedAt,
+                lastCloudSyncTime = lastCloudSyncTime
             )
         )
+    }
+
+    private suspend fun syncActiveSessionToCloud() {
+        if (!currentConfig.cloudBackupEnabled) return
+
+        try {
+            cloudSyncRepository.syncActiveSession(
+                currentConfig,
+                ActiveSessionState.currentTranscript.value,
+                ActiveSessionState.currentNotes.value,
+                ActiveSessionState.finalSummary.value,
+                sessionStartedAt
+            )
+            lastCloudSyncTime = System.currentTimeMillis()
+            activeSessionRepository.updateCloudSyncTime(lastCloudSyncTime)
+        } catch (e: Exception) {
+            Log.e(TAG, "Cloud active-session sync failed", e)
+        }
     }
 
     private fun extractPreviousNotesContext(): String? {
@@ -339,12 +370,15 @@ class RecordingService : Service() {
         transcriptSinceLastNote = snapshot.transcriptSinceLastNote
         lastNoteTime = snapshot.lastNoteTime
         lastFinalTime = snapshot.lastFinalTime
+        sessionStartedAt = snapshot.sessionStartedAt
+        lastCloudSyncTime = snapshot.lastCloudSyncTime
     }
 
     companion object {
         private const val TAG = "RecordingService"
         private const val CHANNEL_ID = "recording"
         private const val NOTIFICATION_ID = 1
+        private const val CLOUD_SYNC_INTERVAL_MS = 60 * 60 * 1000L
 
         const val ACTION_START = "com.example.dndscribe.action.START_RECORDING"
         const val ACTION_STOP = "com.example.dndscribe.action.STOP_RECORDING"

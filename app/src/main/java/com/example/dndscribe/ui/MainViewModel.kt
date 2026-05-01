@@ -14,6 +14,7 @@ import com.example.dndscribe.data.local.SessionEntity
 import com.example.dndscribe.data.remote.AiSessionClient
 import com.example.dndscribe.data.repository.ActiveSessionRepository
 import com.example.dndscribe.data.repository.AppConfig
+import com.example.dndscribe.data.repository.CloudSyncRepository
 import com.example.dndscribe.data.repository.SessionRepository
 import com.example.dndscribe.data.repository.SettingsRepository
 import com.example.dndscribe.recording.ActiveSessionState
@@ -32,6 +33,7 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
     private val sessionRepository = SessionRepository(AppDatabase.getDatabase(application).sessionDao())
     private val settingsRepository = SettingsRepository(application)
     private val activeSessionRepository = ActiveSessionRepository(application)
+    private val cloudSyncRepository = CloudSyncRepository()
     private val gson = Gson()
 
     private val _config = MutableStateFlow(AppConfig())
@@ -160,14 +162,14 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
 
             if (currentTranscript.value.isBlank() && currentNotes.value.isBlank()) return@launch
             val name = "Session - " + SimpleDateFormat("yyyy-MM-dd HH:mm", Locale.getDefault()).format(Date())
-            sessionRepository.insertSession(
-                SessionEntity(
-                    name = name,
-                    fullTranscript = currentTranscript.value,
-                    notes = currentNotes.value,
-                    finalSummary = finalSummary.value
-                )
+            val session = SessionEntity(
+                name = name,
+                fullTranscript = currentTranscript.value,
+                notes = currentNotes.value,
+                finalSummary = finalSummary.value
             )
+            val insertedId = sessionRepository.insertSession(session)
+            syncSessionToCloud(session.copy(id = insertedId))
             clearActiveSession()
         }
     }
@@ -305,12 +307,60 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
         }
     }
 
+    fun syncNow(context: Context) {
+        viewModelScope.launch {
+            try {
+                val cfg = _config.value
+                if (!cfg.cloudBackupEnabled) {
+                    Toast.makeText(context, "Cloud backup is off", Toast.LENGTH_SHORT).show()
+                    return@launch
+                }
+                val sessions = allSessions.firstOrNull().orEmpty()
+                cloudSyncRepository.syncSessions(cfg, sessions)
+                if (currentTranscript.value.isNotBlank() || currentNotes.value.isNotBlank() || finalSummary.value.isNotBlank()) {
+                    val snapshot = activeSessionRepository.snapshotFlow.first()
+                    cloudSyncRepository.syncActiveSession(
+                        cfg,
+                        currentTranscript.value,
+                        currentNotes.value,
+                        finalSummary.value,
+                        snapshot.sessionStartedAt
+                    )
+                    activeSessionRepository.updateCloudSyncTime(System.currentTimeMillis())
+                }
+                Toast.makeText(context, "Cloud sync complete", Toast.LENGTH_SHORT).show()
+            } catch (e: Exception) {
+                Log.e("MainViewModel", "Cloud sync failed", e)
+                Toast.makeText(context, "Cloud sync failed: ${e.message}", Toast.LENGTH_LONG).show()
+            }
+        }
+    }
+
     private suspend fun persistActiveSessionContent() {
         activeSessionRepository.updateContent(
             transcript = currentTranscript.value,
             notes = currentNotes.value,
             finalSummary = finalSummary.value
         )
+    }
+
+    private suspend fun syncSessionToCloud(session: SessionEntity) {
+        val cfg = _config.value
+        if (!cfg.cloudBackupEnabled) return
+
+        try {
+            cloudSyncRepository.syncSession(cfg, session)
+        } catch (e: Exception) {
+            Log.e("MainViewModel", "Cloud session sync failed", e)
+            Toast.makeText(getApplication(), "Saved locally, but cloud sync failed: ${e.message}", Toast.LENGTH_LONG).show()
+            return
+        }
+
+        try {
+            cloudSyncRepository.deleteActiveSession(cfg)
+        } catch (e: Exception) {
+            Log.w("MainViewModel", "Cloud active-session cleanup failed", e)
+        }
     }
 
     private fun extractPreviousNotesContext(notes: String, config: AppConfig): String? {
