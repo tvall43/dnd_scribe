@@ -17,20 +17,20 @@ object RetrofitClient {
         }
     }
 
-    private val client = OkHttpClient.Builder()
+    private fun client(readTimeoutSeconds: Long) = OkHttpClient.Builder()
         .addInterceptor(loggingInterceptor)
         .connectTimeout(30, TimeUnit.SECONDS)
-        .readTimeout(60, TimeUnit.SECONDS)
+        .readTimeout(readTimeoutSeconds, TimeUnit.SECONDS)
         .writeTimeout(60, TimeUnit.SECONDS)
         .build()
 
-    private val retrofit = Retrofit.Builder()
+    private fun retrofit(client: OkHttpClient) = Retrofit.Builder()
         .baseUrl("http://localhost/") // Placeholder, URLs are provided per request
         .client(client)
         .addConverterFactory(GsonConverterFactory.create())
         .build()
 
-    val whisperApi: WhisperApi = retrofit.create(WhisperApi::class.java)
-    val llmApi: LlmApi = retrofit.create(LlmApi::class.java)
-    val cloudApi: CloudApi = retrofit.create(CloudApi::class.java)
+    val whisperApi: WhisperApi = retrofit(client(60)).create(WhisperApi::class.java)
+    val llmApi: LlmApi = retrofit(client(240)).create(LlmApi::class.java)
+    val cloudApi: CloudApi = retrofit(client(60)).create(CloudApi::class.java)
 }
