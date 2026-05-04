@@ -73,7 +73,7 @@ class SettingsRepository(private val context: Context) {
                 allowInsecureHttp = preferences[Keys.ALLOW_INSECURE_HTTP] ?: false,
                 syncApiSettings = preferences[Keys.SYNC_API] ?: false,
                 llmModel = preferences[Keys.LLM_MODEL] ?: "mistral",
-                whisperModel = preferences[Keys.WHISPER_MODEL] ?: "base",
+                whisperModel = preferences[Keys.WHISPER_MODEL] ?: AppConfig().whisperModel,
                 chunkSec = preferences[Keys.CHUNK_SEC] ?: 15,
                 notesIntervalMin = preferences[Keys.NOTES_INTERVAL] ?: 10,
                 finalIntervalMin = preferences[Keys.FINAL_INTERVAL] ?: 120,
