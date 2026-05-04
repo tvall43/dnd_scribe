@@ -14,6 +14,8 @@ export DND_SCRIBE_EMBEDDING_MODEL="embeddinggemma"
 uvicorn dnd_scribe_server.main:app --app-dir src --host 0.0.0.0 --port 8000
 ```
 
+`DND_SCRIBE_EMBEDDING_URL` should point at the OpenAI-compatible embedding API root for your provider. For LiteLLM and similar servers that follow the OpenAI layout, that is usually the `/v1` base path shown above; if your provider exposes embeddings somewhere else, set the URL to match that server's route structure.
+
 ## Endpoints
 
 - `GET /health`
