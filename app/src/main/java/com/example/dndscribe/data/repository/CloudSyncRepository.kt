@@ -2,6 +2,7 @@ package com.example.dndscribe.data.repository
 
 import com.example.dndscribe.data.local.SessionEntity
 import com.example.dndscribe.data.remote.AiSessionClient
+import com.example.dndscribe.data.remote.CloudSessionResponse
 import com.example.dndscribe.data.remote.CloudSessionRequest
 import com.example.dndscribe.data.remote.CloudSyncRequest
 import com.example.dndscribe.data.remote.RetrofitClient
@@ -27,6 +28,24 @@ class CloudSyncRepository {
             buildEndpoint(config, "/sessions"),
             authHeader(config),
             session.toCloudRequest(config, remoteId)
+        )
+    }
+
+    suspend fun fetchSessions(config: AppConfig, limit: Int = 500, offset: Int = 0): List<CloudSessionResponse> {
+        if (!canSync(config)) return emptyList()
+
+        return RetrofitClient.cloudApi.listSessions(
+            buildEndpoint(config, "/sessions?limit=$limit&offset=$offset"),
+            authHeader(config)
+        )
+    }
+
+    suspend fun fetchSession(config: AppConfig, remoteId: String): CloudSessionResponse {
+        if (!canSync(config)) throw IllegalStateException("Cloud sync is not configured")
+
+        return RetrofitClient.cloudApi.getSession(
+            buildEndpoint(config, "/sessions/${remoteId}"),
+            authHeader(config)
         )
     }
 

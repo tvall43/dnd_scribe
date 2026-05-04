@@ -4,6 +4,7 @@ import com.google.gson.annotations.SerializedName
 import retrofit2.http.Body
 import retrofit2.http.DELETE
 import retrofit2.http.Header
+import retrofit2.http.GET
 import retrofit2.http.POST
 import retrofit2.http.Url
 
@@ -27,6 +28,18 @@ interface CloudApi {
         @Url url: String,
         @Header("Authorization") authHeader: String?
     ): CloudDeleteResponse
+
+    @GET
+    suspend fun listSessions(
+        @Url url: String,
+        @Header("Authorization") authHeader: String?
+    ): List<CloudSessionResponse>
+
+    @GET
+    suspend fun getSession(
+        @Url url: String,
+        @Header("Authorization") authHeader: String?
+    ): CloudSessionResponse
 }
 
 data class CloudSyncRequest(

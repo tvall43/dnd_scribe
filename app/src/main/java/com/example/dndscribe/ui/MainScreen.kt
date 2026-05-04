@@ -222,6 +222,12 @@ fun ArchivesPane(viewModel: MainViewModel) {
         uri?.let { viewModel.importArchives(it, context) }
     }
 
+    val settingsPickerLauncher = rememberLauncherForActivityResult(
+        contract = ActivityResultContracts.GetContent()
+    ) { uri ->
+        uri?.let { viewModel.importSettings(it, context) }
+    }
+
     if (selectedSession != null) {
         SessionDetailView(session = selectedSession!!, onBack = { selectedSession = null })
     } else {
@@ -244,8 +250,17 @@ fun ArchivesPane(viewModel: MainViewModel) {
                 IconButton(onClick = { viewModel.exportArchives(context) }) {
                     Icon(Icons.Default.Share, contentDescription = "Export All", tint = Gold)
                 }
+                IconButton(onClick = { viewModel.exportSettings(context) }) {
+                    Icon(Icons.Default.SettingsBackupRestore, contentDescription = "Backup Settings", tint = Gold)
+                }
+                IconButton(onClick = { settingsPickerLauncher.launch("application/json") }) {
+                    Icon(Icons.Default.Restore, contentDescription = "Restore Settings", tint = Gold)
+                }
                 IconButton(onClick = { filePickerLauncher.launch("application/json") }) {
                     Icon(Icons.Default.FileUpload, contentDescription = "Import", tint = Gold)
+                }
+                IconButton(onClick = { viewModel.pullFromCloud(context) }) {
+                    Icon(Icons.Default.CloudDownload, contentDescription = "Pull from Cloud", tint = Gold)
                 }
             }
             LazyColumn(modifier = Modifier.fillMaxSize()) {

@@ -273,6 +273,64 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
         }
     }
 
+    fun exportSettings(context: Context) {
+        viewModelScope.launch {
+            try {
+                val exportDir = File(context.cacheDir, "exports")
+                if (!exportDir.exists()) {
+                    exportDir.mkdirs()
+                }
+                exportDir.listFiles()?.forEach { existingFile ->
+                    if (existingFile.isFile) {
+                        existingFile.delete()
+                    }
+                }
+
+                val fileName = "dnd-scribe-settings.json"
+                val exportFile = File(exportDir, fileName)
+                exportFile.writeText(gson.toJson(_config.value))
+                val uri = FileProvider.getUriForFile(
+                    context,
+                    "${context.packageName}.fileprovider",
+                    exportFile
+                )
+
+                val sendIntent: Intent = Intent().apply {
+                    action = Intent.ACTION_SEND
+                    putExtra(Intent.EXTRA_STREAM, uri)
+                    addFlags(Intent.FLAG_GRANT_READ_URI_PERMISSION)
+                    type = "application/json"
+                }
+
+                val shareIntent = Intent.createChooser(sendIntent, "Backup DnD Scribe Settings")
+                shareIntent.addFlags(Intent.FLAG_ACTIVITY_NEW_TASK)
+                context.startActivity(shareIntent)
+            } catch (e: Exception) {
+                Log.e("MainViewModel", "Settings export failed", e)
+                Toast.makeText(context, "Settings backup failed: ${e.message}", Toast.LENGTH_SHORT).show()
+            }
+        }
+    }
+
+    fun importSettings(uri: Uri, context: Context) {
+        viewModelScope.launch {
+            try {
+                val json = context.contentResolver.openInputStream(uri)?.bufferedReader()?.use { it.readText() }
+                if (json.isNullOrBlank()) {
+                    Toast.makeText(context, "Settings file was empty", Toast.LENGTH_SHORT).show()
+                    return@launch
+                }
+
+                val importedConfig = gson.fromJson(json, AppConfig::class.java)
+                updateConfig(importedConfig)
+                Toast.makeText(context, "Settings restored", Toast.LENGTH_SHORT).show()
+            } catch (e: Exception) {
+                Log.e("MainViewModel", "Settings import failed", e)
+                Toast.makeText(context, "Settings restore failed: ${e.message}", Toast.LENGTH_SHORT).show()
+            }
+        }
+    }
+
     fun importArchives(uri: Uri, context: Context) {
         viewModelScope.launch {
             try {
@@ -332,6 +390,52 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
             } catch (e: Exception) {
                 Log.e("MainViewModel", "Cloud sync failed", e)
                 Toast.makeText(context, "Cloud sync failed: ${e.message}", Toast.LENGTH_LONG).show()
+            }
+        }
+    }
+
+    fun pullFromCloud(context: Context) {
+        viewModelScope.launch {
+            try {
+                val cfg = _config.value
+                if (!cfg.cloudBackupEnabled) {
+                    Toast.makeText(context, "Cloud backup is off", Toast.LENGTH_SHORT).show()
+                    return@launch
+                }
+
+                val remoteSessions = cloudSyncRepository.fetchSessions(cfg)
+                val localSessions = allSessions.firstOrNull().orEmpty()
+                val existingKeys = localSessions.mapTo(mutableSetOf()) { session ->
+                    listOf(session.name, session.date.toString(), session.fullTranscript, session.notes, session.finalSummary)
+                }
+
+                var insertedCount = 0
+                remoteSessions.forEach { remote ->
+                    val sessionKey = listOf(
+                        remote.name,
+                        remote.date.toString(),
+                        remote.fullTranscript,
+                        remote.notes,
+                        remote.finalSummary
+                    )
+                    if (existingKeys.add(sessionKey)) {
+                        sessionRepository.insertSession(
+                            SessionEntity(
+                                name = remote.name,
+                                date = remote.date,
+                                fullTranscript = remote.fullTranscript,
+                                notes = remote.notes,
+                                finalSummary = remote.finalSummary
+                            )
+                        )
+                        insertedCount += 1
+                    }
+                }
+
+                Toast.makeText(context, "Pulled $insertedCount sessions from server", Toast.LENGTH_SHORT).show()
+            } catch (e: Exception) {
+                Log.e("MainViewModel", "Cloud pull failed", e)
+                Toast.makeText(context, "Cloud pull failed: ${e.message}", Toast.LENGTH_LONG).show()
             }
         }
     }
