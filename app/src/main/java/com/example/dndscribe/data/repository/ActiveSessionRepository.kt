@@ -23,7 +23,8 @@ data class ActiveSessionSnapshot(
     val lastNoteTime: Long = 0L,
     val lastFinalTime: Long = 0L,
     val sessionStartedAt: Long = 0L,
-    val lastCloudSyncTime: Long = 0L
+    val lastCloudSyncTime: Long = 0L,
+    val activeAudioFile: String? = null
 )
 
 class ActiveSessionRepository(private val context: Context) {
@@ -36,6 +37,7 @@ class ActiveSessionRepository(private val context: Context) {
         val LAST_FINAL_TIME = longPreferencesKey("last_final_time")
         val SESSION_STARTED_AT = longPreferencesKey("session_started_at")
         val LAST_CLOUD_SYNC_TIME = longPreferencesKey("last_cloud_sync_time")
+        val ACTIVE_AUDIO_FILE = stringPreferencesKey("active_audio_file")
     }
 
     val snapshotFlow: Flow<ActiveSessionSnapshot> = context.activeSessionDataStore.data
@@ -53,10 +55,12 @@ class ActiveSessionRepository(private val context: Context) {
                 finalSummary = preferences[Keys.FINAL_SUMMARY] ?: "",
                 transcriptSinceLastNote = preferences[Keys.TRANSCRIPT_SINCE_LAST_NOTE] ?: "",
                 lastNoteTime = preferences[Keys.LAST_NOTE_TIME] ?: 0L,
-                lastFinalTime = preferences[Keys.LAST_FINAL_TIME] ?: 0L,
-                sessionStartedAt = preferences[Keys.SESSION_STARTED_AT] ?: 0L,
-                lastCloudSyncTime = preferences[Keys.LAST_CLOUD_SYNC_TIME] ?: 0L
-            )
+                        lastFinalTime = preferences[Keys.LAST_FINAL_TIME] ?: 0L,
+                        sessionStartedAt = preferences[Keys.SESSION_STARTED_AT] ?: 0L,
+                        lastCloudSyncTime = preferences[Keys.LAST_CLOUD_SYNC_TIME] ?: 0L,
+                        activeAudioFile = preferences[Keys.ACTIVE_AUDIO_FILE]
+                    )
+
         }
 
     suspend fun updateAll(snapshot: ActiveSessionSnapshot) {
@@ -69,10 +73,16 @@ class ActiveSessionRepository(private val context: Context) {
             preferences[Keys.LAST_FINAL_TIME] = snapshot.lastFinalTime
             preferences[Keys.SESSION_STARTED_AT] = snapshot.sessionStartedAt
             preferences[Keys.LAST_CLOUD_SYNC_TIME] = snapshot.lastCloudSyncTime
+            if (snapshot.activeAudioFile != null) {
+                preferences[Keys.ACTIVE_AUDIO_FILE] = snapshot.activeAudioFile
+            } else {
+                preferences.remove(Keys.ACTIVE_AUDIO_FILE)
+            }
         }
     }
-
+    
     suspend fun updateCloudSyncTime(lastCloudSyncTime: Long) {
+
         context.activeSessionDataStore.edit { preferences ->
             preferences[Keys.LAST_CLOUD_SYNC_TIME] = lastCloudSyncTime
         }

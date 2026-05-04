@@ -49,6 +49,7 @@ class RecordingService : Service() {
     private var lastFinalTime = System.currentTimeMillis()
     private var sessionStartedAt = 0L
     private var lastCloudSyncTime = 0L
+    private var currentAudioFile: File? = null
 
     override fun onCreate() {
         super.onCreate()
@@ -59,7 +60,18 @@ class RecordingService : Service() {
     }
 
     override fun onStartCommand(intent: Intent?, flags: Int, startId: Int): Int {
-        when (intent?.action) {
+        if (intent == null) {
+            serviceScope.launch {
+                if (ActiveSessionState.isRecording.value) {
+                restorePersistedSession()
+                startRecordingLoop()
+            }
+
+            }
+            return START_STICKY
+        }
+
+        when (intent.action) {
             ACTION_START -> serviceScope.launch {
                 currentConfig = settingsRepository.configFlow.first()
                 restorePersistedSession()
@@ -92,8 +104,10 @@ class RecordingService : Service() {
 
         startForegroundWithNotification()
 
-        val audioFile = File(cacheDir, "recording.webm")
         try {
+            val audioFile = File(cacheDir, "rec_${System.currentTimeMillis()}.webm")
+            currentAudioFile = audioFile
+            
             mediaRecorder = createRecorder(audioFile)
             ActiveSessionState.setRecording(true)
             if (lastNoteTime == 0L) {
@@ -106,7 +120,7 @@ class RecordingService : Service() {
                 sessionStartedAt = System.currentTimeMillis()
             }
             persistActiveSession()
-            startRecordingLoop(audioFile)
+            startRecordingLoop()
         } catch (e: Exception) {
             Log.e(TAG, "Failed to start recording", e)
             ActiveSessionState.setRecording(false)
@@ -116,14 +130,14 @@ class RecordingService : Service() {
         }
     }
 
-    private fun startRecordingLoop(audioFile: File) {
+    private fun startRecordingLoop() {
         recordingJob?.cancel()
         recordingJob = serviceScope.launch {
             while (ActiveSessionState.isRecording.value) {
                 delay(currentConfig.chunkSec * 1000L)
                 if (!ActiveSessionState.isRecording.value) break
 
-                rotateAndTranscribe(audioFile)
+                rotateAndTranscribe()
 
                 val now = System.currentTimeMillis()
                 if (now - lastNoteTime > currentConfig.notesIntervalMin * 60 * 1000L) {
@@ -150,8 +164,7 @@ class RecordingService : Service() {
         recordingJob?.cancel()
         recordingJob = null
 
-        val activeFile = File(cacheDir, "recording.webm")
-        val stoppedFile = stopCurrentRecorder(activeFile)
+        val stoppedFile = stopCurrentRecorder()
         if (stoppedFile?.exists() == true && stoppedFile.length() > 0L) {
             transcribeFile(stoppedFile)
         }
@@ -163,11 +176,14 @@ class RecordingService : Service() {
         stopSelf()
     }
 
-    private suspend fun rotateAndTranscribe(audioFile: File) {
+    private suspend fun rotateAndTranscribe() {
         try {
-            val transcribeFile = stopCurrentRecorder(audioFile)
+            val transcribeFile = stopCurrentRecorder()
             if (ActiveSessionState.isRecording.value) {
-                mediaRecorder = createRecorder(audioFile)
+                val nextFile = File(cacheDir, "rec_${System.currentTimeMillis()}.webm")
+                currentAudioFile = nextFile
+                mediaRecorder = createRecorder(nextFile)
+                persistActiveSession()
             }
             if (transcribeFile?.exists() == true) {
                 transcribeFile(transcribeFile)
@@ -254,7 +270,7 @@ class RecordingService : Service() {
         }
     }
 
-    private fun stopCurrentRecorder(audioFile: File): File? {
+    private fun stopCurrentRecorder(): File? {
         val recorder = mediaRecorder ?: return null
         mediaRecorder = null
 
@@ -262,8 +278,10 @@ class RecordingService : Service() {
             recorder.stop()
             recorder.release()
 
-            val transcribeFile = File(cacheDir, "chunk_${System.currentTimeMillis()}.webm")
-            if (audioFile.exists() && audioFile.renameTo(transcribeFile)) transcribeFile else null
+            val file = currentAudioFile
+            currentAudioFile = null
+            serviceScope.launch { persistActiveSession() }
+            file
         } catch (e: Exception) {
             recorder.release()
             Log.e(TAG, "Failed stopping recorder", e)
@@ -330,7 +348,8 @@ class RecordingService : Service() {
                 lastNoteTime = lastNoteTime,
                 lastFinalTime = lastFinalTime,
                 sessionStartedAt = sessionStartedAt,
-                lastCloudSyncTime = lastCloudSyncTime
+                lastCloudSyncTime = lastCloudSyncTime,
+                activeAudioFile = currentAudioFile?.name
             )
         )
     }
@@ -372,6 +391,7 @@ class RecordingService : Service() {
         lastFinalTime = snapshot.lastFinalTime
         sessionStartedAt = snapshot.sessionStartedAt
         lastCloudSyncTime = snapshot.lastCloudSyncTime
+        currentAudioFile = snapshot.activeAudioFile?.let { File(cacheDir, it) }
     }
 
     companion object {
