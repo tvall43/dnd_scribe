@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import html
+import json
 import os
 import time
 
@@ -8,7 +9,19 @@ from fastapi import Depends, FastAPI, Form, HTTPException, Query, Request
 from fastapi.responses import HTMLResponse, RedirectResponse
 
 from .auth import UI_AUTH_COOKIE, require_bearer_token
-from .schemas import SessionCreate, SessionListItem, SessionRecord, SyncRequest, SyncResult
+from .chunking import chunk_text
+from .embeddings import embed_texts, get_embedding_config
+from .schemas import (
+    SemanticMatchResponse,
+    SessionChunkResponse,
+    SessionCreate,
+    SessionFieldResponse,
+    SessionListItem,
+    SessionRecord,
+    SyncRequest,
+    SyncResult,
+)
+from .semantic import SemanticMatch, cosine_similarity, decode_embedding
 from .storage import db, initialize_database
 
 app = FastAPI(title="DnD Scribe Server", version="0.1.0")
@@ -27,6 +40,8 @@ BASE_PATH = _base_path()
 @app.on_event("startup")
 def on_startup() -> None:
     initialize_database()
+    _backfill_session_chunks()
+    _backfill_chunk_embeddings()
 
 
 def _row_to_record(row) -> SessionRecord:
@@ -41,6 +56,125 @@ def _row_to_record(row) -> SessionRecord:
         created_at=row["created_at"],
         updated_at=row["updated_at"],
     )
+
+
+def _row_to_field_response(row, field: str, content: str) -> SessionFieldResponse:
+    return SessionFieldResponse(
+        id=row["id"],
+        name=row["name"],
+        field=field,
+        content=content,
+    )
+
+
+def _session_text_chunks(row) -> list[tuple[str, int, str]]:
+    pieces: list[tuple[str, int, str]] = []
+    for kind, text in (("summary", row["final_summary"]), ("notes", row["notes"]), ("transcript", row["full_transcript"])):
+        for chunk in chunk_text(text or "", kind=kind):
+            pieces.append((kind, chunk.chunk_index, chunk.text))
+    return pieces
+
+
+def _session_chunk_texts(row) -> list[str]:
+    return [text for _, _, text in _session_text_chunks(row)]
+
+
+def _serialize_embedding(value: list[float] | None) -> str | None:
+    return json.dumps(value) if value is not None else None
+
+
+def _replace_session_chunks(conn, session_row) -> None:
+    session_id = session_row["id"]
+    conn.execute("DELETE FROM session_chunks WHERE session_id = ?", (session_id,))
+    created_at = int(time.time() * 1000)
+    chunks = _session_text_chunks(session_row)
+    if not chunks:
+        return
+
+    embeddings: list[list[float]] | None = None
+    if get_embedding_config().enabled:
+        try:
+            embeddings = _embed_in_batches([text for _, _, text in chunks])
+        except Exception:
+            embeddings = None
+
+    for chunk, embedding in zip(chunks, embeddings or [None] * len(chunks)):
+        kind, chunk_index, text = chunk
+        conn.execute(
+            """
+            INSERT INTO session_chunks (
+                session_id, chunk_index, kind, text, embedding, created_at, updated_at
+            ) VALUES (?, ?, ?, ?, ?, ?, ?)
+            ON CONFLICT(session_id, kind, chunk_index) DO UPDATE SET
+                text = excluded.text,
+                embedding = excluded.embedding,
+                updated_at = excluded.updated_at
+            """,
+            (
+                session_id,
+                chunk_index,
+                kind,
+                text,
+                _serialize_embedding(embedding),
+                created_at,
+                created_at,
+            ),
+        )
+
+
+def _chunk_row_to_dict(row) -> dict[str, object]:
+    return {
+        "id": row["id"],
+        "session_id": row["session_id"],
+        "chunk_index": row["chunk_index"],
+        "kind": row["kind"],
+        "text": row["text"],
+        "embedding": decode_embedding(row["embedding"]),
+        "created_at": row["created_at"],
+        "updated_at": row["updated_at"],
+    }
+
+
+def _embed_in_batches(texts: list[str]) -> list[list[float]]:
+    if not texts:
+        return []
+    # Keep batches modest for lightweight OpenAI-compatible embedding servers.
+    batch_size = 16
+    vectors: list[list[float]] = []
+    for start in range(0, len(texts), batch_size):
+        vectors.extend(embed_texts(texts[start:start + batch_size]))
+    return vectors
+
+
+def _backfill_session_chunks() -> None:
+    with db() as conn:
+        sessions = conn.execute("SELECT * FROM sessions ORDER BY session_date ASC, updated_at ASC").fetchall()
+        for row in sessions:
+            existing = conn.execute("SELECT 1 FROM session_chunks WHERE session_id = ? LIMIT 1", (row["id"],)).fetchone()
+            if existing is None:
+                _replace_session_chunks(conn, row)
+
+
+def _backfill_chunk_embeddings() -> None:
+    if not get_embedding_config().enabled:
+        return
+
+    try:
+        with db() as conn:
+            rows = conn.execute(
+                "SELECT id, text FROM session_chunks WHERE embedding IS NULL OR embedding = '' ORDER BY id ASC"
+            ).fetchall()
+            if not rows:
+                return
+
+            vectors = _embed_in_batches([row["text"] for row in rows])
+            for row, vector in zip(rows, vectors):
+                conn.execute(
+                    "UPDATE session_chunks SET embedding = ?, updated_at = ? WHERE id = ?",
+                    (_serialize_embedding(vector), int(time.time() * 1000), row["id"]),
+                )
+    except Exception:
+        return
 
 
 def _preview(text: str, limit: int = 180) -> str:
@@ -83,6 +217,18 @@ def _ui_login_page(next_path: str = "/", message: str = "") -> HTMLResponse:
 </div>
 '''
     return _render_page("DnD Scribe Login", body)
+
+
+def _fetch_session_by_id(session_id: str):
+    with db() as conn:
+        return conn.execute("SELECT * FROM sessions WHERE id = ?", (session_id,)).fetchone()
+
+
+def _fetch_latest_session():
+    with db() as conn:
+        return conn.execute(
+            "SELECT * FROM sessions ORDER BY session_date DESC, updated_at DESC LIMIT 1"
+        ).fetchone()
 
 
 def _render_page(title: str, body: str) -> HTMLResponse:
@@ -198,32 +344,47 @@ def index(request: Request, q: str = "") -> HTMLResponse:
     if not _ui_is_authenticated(request):
         return _ui_login_page(next_path=_ui_path("/"))
 
-    with db() as conn:
-        if q.strip():
-            pattern = f"%{q}%"
-            rows = conn.execute(
-                """
-                SELECT * FROM sessions
-                WHERE name LIKE ? OR notes LIKE ? OR final_summary LIKE ? OR full_transcript LIKE ?
-                ORDER BY session_date DESC, updated_at DESC
-                LIMIT 100
-                """,
-                (pattern, pattern, pattern, pattern),
-            ).fetchall()
-        else:
-            rows = conn.execute(
-                "SELECT * FROM sessions ORDER BY session_date DESC, updated_at DESC LIMIT 100"
-            ).fetchall()
-
+    semantic_mode = bool(q.strip()) and get_embedding_config().enabled
     items = []
-    for row in rows:
-        items.append(
-            f'''<div class="list-item">
+    if semantic_mode:
+        try:
+            results = _semantic_matches(q.strip(), limit=20)
+            for match in results:
+                items.append(
+                    f'''<div class="list-item">
+  <div><a href="{_ui_path(f'/ui/sessions/{match.session_id}')}" ><strong>{_html_escape(match.session_name)}</strong></a></div>
+  <div class="muted small">{_html_escape(match.kind)} · score {match.score:.3f} · chunk {match.chunk_index}</div>
+  <div class="small">{_html_escape(_preview(match.text, 240))}</div>
+</div>'''
+                )
+        except HTTPException:
+            semantic_mode = False
+    else:
+        with db() as conn:
+            if q.strip():
+                pattern = f"%{q}%"
+                rows = conn.execute(
+                    """
+                    SELECT * FROM sessions
+                    WHERE name LIKE ? OR notes LIKE ? OR final_summary LIKE ? OR full_transcript LIKE ?
+                    ORDER BY session_date DESC, updated_at DESC
+                    LIMIT 100
+                    """,
+                    (pattern, pattern, pattern, pattern),
+                ).fetchall()
+            else:
+                rows = conn.execute(
+                    "SELECT * FROM sessions ORDER BY session_date DESC, updated_at DESC LIMIT 100"
+                ).fetchall()
+
+        for row in rows:
+            items.append(
+                f'''<div class="list-item">
   <div><a href="{_ui_path(f'/ui/sessions/{row["id"]}')}" ><strong>{_html_escape(row["name"])}</strong></a></div>
   <div class="muted small">{row["id"]} · {row["session_date"]}</div>
   <div class="small">{_html_escape(_preview(row["final_summary"] or row["notes"] or row["full_transcript"]))}</div>
 </div>'''
-        )
+            )
 
     body = f'''
 <h1>DnD Scribe</h1>
@@ -240,11 +401,11 @@ def index(request: Request, q: str = "") -> HTMLResponse:
   <form method="get" action="{_ui_path('/')}">
     <label>Search</label>
     <input name="q" value="{_html_escape(q)}" placeholder="Search sessions" />
-    <button type="submit">Search</button>
+    <button type="submit">{'Semantic Search' if semantic_mode else 'Search'}</button>
   </form>
 </div>
 <div class="card">
-  <div class="muted">Recent sessions</div>
+  <div class="muted">{'Semantic matches' if semantic_mode else 'Recent sessions'}</div>
   {''.join(items) if items else '<p class="muted">No sessions yet.</p>'}
 </div>
 '''
@@ -319,6 +480,7 @@ def upsert_session(session: SessionCreate) -> SessionRecord:
             ),
         )
         row = conn.execute("SELECT * FROM sessions WHERE id = ?", (session.id,)).fetchone()
+        _replace_session_chunks(conn, row)
     return _row_to_record(row)
 
 
@@ -357,6 +519,38 @@ def list_sessions(limit: int = Query(default=50, ge=1, le=500), offset: int = Qu
     ]
 
 
+@app.get("/sessions/latest", response_model=SessionRecord, dependencies=[Depends(require_bearer_token)])
+def get_latest_session() -> SessionRecord:
+    row = _fetch_latest_session()
+    if row is None:
+        raise HTTPException(status_code=404, detail="Session not found")
+    return _row_to_record(row)
+
+
+@app.get("/sessions/latest/summary", response_model=SessionFieldResponse, dependencies=[Depends(require_bearer_token)])
+def get_latest_summary() -> SessionFieldResponse:
+    row = _fetch_latest_session()
+    if row is None:
+        raise HTTPException(status_code=404, detail="Session not found")
+    return _row_to_field_response(row, "summary", row["final_summary"])
+
+
+@app.get("/sessions/latest/notes", response_model=SessionFieldResponse, dependencies=[Depends(require_bearer_token)])
+def get_latest_notes() -> SessionFieldResponse:
+    row = _fetch_latest_session()
+    if row is None:
+        raise HTTPException(status_code=404, detail="Session not found")
+    return _row_to_field_response(row, "notes", row["notes"])
+
+
+@app.get("/sessions/latest/transcript", response_model=SessionFieldResponse, dependencies=[Depends(require_bearer_token)])
+def get_latest_transcript() -> SessionFieldResponse:
+    row = _fetch_latest_session()
+    if row is None:
+        raise HTTPException(status_code=404, detail="Session not found")
+    return _row_to_field_response(row, "transcript", row["full_transcript"])
+
+
 @app.get("/sessions/search", response_model=list[SessionListItem], dependencies=[Depends(require_bearer_token)])
 def search_sessions(q: str, limit: int = Query(default=50, ge=1, le=500)) -> list[SessionListItem]:
     pattern = f"%{q}%"
@@ -384,6 +578,127 @@ def search_sessions(q: str, limit: int = Query(default=50, ge=1, le=500)) -> lis
         )
         for row in rows
     ]
+
+
+def _chunk_row_to_response(row) -> SessionChunkResponse:
+    return SessionChunkResponse(
+        id=row["id"],
+        session_id=row["session_id"],
+        session_name=row["session_name"],
+        chunk_index=row["chunk_index"],
+        kind=row["kind"],
+        text=row["text"],
+    )
+
+
+def _semantic_matches(q: str, limit: int = 10) -> list[SemanticMatchResponse]:
+    _ensure_embeddings_available()
+    try:
+        query_embedding = embed_texts([q])[0]
+    except Exception as exc:
+        raise HTTPException(status_code=503, detail=f"Embedding query failed: {exc}") from exc
+
+    _backfill_chunk_embeddings()
+
+    matches: list[SemanticMatch] = []
+    with db() as conn:
+        rows = conn.execute(
+            """
+            SELECT sc.id AS chunk_id, sc.session_id, s.name AS session_name, sc.chunk_index, sc.kind, sc.text, sc.embedding
+            FROM session_chunks sc
+            JOIN sessions s ON s.id = sc.session_id
+            WHERE sc.embedding IS NOT NULL AND sc.embedding != ''
+            """,
+        ).fetchall()
+
+    for row in rows:
+        embedding = decode_embedding(row["embedding"])
+        if embedding is None:
+            continue
+        score = cosine_similarity(query_embedding, embedding)
+        matches.append(
+            SemanticMatch(
+                session_id=row["session_id"],
+                session_name=row["session_name"],
+                chunk_id=row["chunk_id"],
+                chunk_index=row["chunk_index"],
+                kind=row["kind"],
+                score=score,
+                text=row["text"],
+            )
+        )
+
+    matches.sort(key=lambda match: match.score, reverse=True)
+    return [
+        SemanticMatchResponse(
+            session_id=match.session_id,
+            session_name=match.session_name,
+            chunk_id=match.chunk_id,
+            chunk_index=match.chunk_index,
+            kind=match.kind,
+            score=match.score,
+            text=match.text,
+        )
+        for match in matches[:limit]
+    ]
+
+
+@app.get("/sessions/latest/chunks", response_model=list[SessionChunkResponse], dependencies=[Depends(require_bearer_token)])
+def get_latest_chunks() -> list[SessionChunkResponse]:
+    row = _fetch_latest_session()
+    if row is None:
+        raise HTTPException(status_code=404, detail="Session not found")
+    return get_session_chunks(row["id"])
+
+
+@app.get("/sessions/{session_id}/chunks", response_model=list[SessionChunkResponse], dependencies=[Depends(require_bearer_token)])
+def get_session_chunks(session_id: str) -> list[SessionChunkResponse]:
+    with db() as conn:
+        rows = conn.execute(
+            """
+            SELECT sc.id, sc.session_id, s.name AS session_name, sc.chunk_index, sc.kind, sc.text
+            FROM session_chunks sc
+            JOIN sessions s ON s.id = sc.session_id
+            WHERE sc.session_id = ?
+            ORDER BY sc.kind, sc.chunk_index
+            """,
+            (session_id,),
+        ).fetchall()
+    return [_chunk_row_to_response(row) for row in rows]
+
+
+def _ensure_embeddings_available() -> None:
+    if not get_embedding_config().enabled:
+        raise HTTPException(status_code=400, detail="Embedding service is not configured")
+
+
+@app.get("/search/semantic", response_model=list[SemanticMatchResponse], dependencies=[Depends(require_bearer_token)])
+def search_semantic(q: str, limit: int = Query(default=10, ge=1, le=50)) -> list[SemanticMatchResponse]:
+    return _semantic_matches(q, limit=limit)
+
+
+@app.get("/sessions/{session_id}/summary", response_model=SessionFieldResponse, dependencies=[Depends(require_bearer_token)])
+def get_session_summary(session_id: str) -> SessionFieldResponse:
+    row = _fetch_session_by_id(session_id)
+    if row is None:
+        raise HTTPException(status_code=404, detail="Session not found")
+    return _row_to_field_response(row, "summary", row["final_summary"])
+
+
+@app.get("/sessions/{session_id}/notes", response_model=SessionFieldResponse, dependencies=[Depends(require_bearer_token)])
+def get_session_notes(session_id: str) -> SessionFieldResponse:
+    row = _fetch_session_by_id(session_id)
+    if row is None:
+        raise HTTPException(status_code=404, detail="Session not found")
+    return _row_to_field_response(row, "notes", row["notes"])
+
+
+@app.get("/sessions/{session_id}/transcript", response_model=SessionFieldResponse, dependencies=[Depends(require_bearer_token)])
+def get_session_transcript(session_id: str) -> SessionFieldResponse:
+    row = _fetch_session_by_id(session_id)
+    if row is None:
+        raise HTTPException(status_code=404, detail="Session not found")
+    return _row_to_field_response(row, "transcript", row["full_transcript"])
 
 
 @app.get("/sessions/{session_id}", response_model=SessionRecord, dependencies=[Depends(require_bearer_token)])

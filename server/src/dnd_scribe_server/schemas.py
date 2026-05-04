@@ -38,3 +38,29 @@ class SyncResult(BaseModel):
 
 class SyncRequest(BaseModel):
     sessions: list[SessionCreate]
+
+
+class SessionFieldResponse(BaseModel):
+    id: str
+    name: str
+    field: str
+    content: str
+
+
+class SessionChunkResponse(BaseModel):
+    id: int
+    session_id: str
+    session_name: str
+    chunk_index: int
+    kind: str
+    text: str
+
+
+class SemanticMatchResponse(BaseModel):
+    session_id: str
+    session_name: str
+    chunk_id: int
+    chunk_index: int
+    kind: str
+    score: float
+    text: str

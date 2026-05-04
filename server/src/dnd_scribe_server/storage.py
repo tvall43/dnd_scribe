@@ -35,13 +35,35 @@ def initialize_database() -> None:
         conn.execute("CREATE INDEX IF NOT EXISTS idx_sessions_date ON sessions(session_date DESC)")
         conn.execute("CREATE INDEX IF NOT EXISTS idx_sessions_name ON sessions(name)")
         conn.execute("CREATE INDEX IF NOT EXISTS idx_sessions_updated ON sessions(updated_at DESC)")
+        conn.execute(
+            """
+            CREATE TABLE IF NOT EXISTS session_chunks (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                session_id TEXT NOT NULL,
+                chunk_index INTEGER NOT NULL,
+                kind TEXT NOT NULL,
+                text TEXT NOT NULL,
+                embedding TEXT,
+                created_at INTEGER NOT NULL,
+                updated_at INTEGER NOT NULL,
+                UNIQUE(session_id, kind, chunk_index)
+            )
+            """
+        )
+        conn.execute("CREATE INDEX IF NOT EXISTS idx_session_chunks_session_id ON session_chunks(session_id)")
+        conn.execute("CREATE INDEX IF NOT EXISTS idx_session_chunks_kind ON session_chunks(kind)")
         conn.commit()
+
+
+def get_connection() -> sqlite3.Connection:
+    conn = sqlite3.connect(_db_path())
+    conn.row_factory = sqlite3.Row
+    return conn
 
 
 @contextmanager
 def db() -> Iterator[sqlite3.Connection]:
-    conn = sqlite3.connect(_db_path())
-    conn.row_factory = sqlite3.Row
+    conn = get_connection()
     try:
         yield conn
         conn.commit()
