@@ -713,20 +713,8 @@ def get_session(session_id: str) -> SessionRecord:
 @app.delete("/sessions/{session_id}", dependencies=[Depends(require_bearer_token)])
 def delete_session(session_id: str) -> dict[str, str]:
     with db() as conn:
+        conn.execute("DELETE FROM session_chunks WHERE session_id = ?", (session_id,))
         result = conn.execute("DELETE FROM sessions WHERE id = ?", (session_id,))
         if result.rowcount == 0:
             raise HTTPException(status_code=404, detail="Session not found")
     return {"status": "deleted", "id": session_id}
-
-
-@app.post("/sessions/{session_id}")
-def delete_via_form(session_id: str, request: Request) -> RedirectResponse:
-    method = request.query_params.get("_method", "").lower()
-    if method != "delete":
-        raise HTTPException(status_code=405, detail="Method not allowed")
-
-    with db() as conn:
-        result = conn.execute("DELETE FROM sessions WHERE id = ?", (session_id,))
-        if result.rowcount == 0:
-            raise HTTPException(status_code=404, detail="Session not found")
-    return RedirectResponse(url=_ui_path("/"), status_code=303)

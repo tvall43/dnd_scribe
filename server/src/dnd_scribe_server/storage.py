@@ -16,6 +16,7 @@ def initialize_database() -> None:
     path = _db_path()
     path.parent.mkdir(parents=True, exist_ok=True)
     with sqlite3.connect(path) as conn:
+        conn.execute("PRAGMA foreign_keys = ON;")
         conn.execute("PRAGMA journal_mode=WAL;")
         conn.execute(
             """
@@ -46,6 +47,7 @@ def initialize_database() -> None:
                 embedding TEXT,
                 created_at INTEGER NOT NULL,
                 updated_at INTEGER NOT NULL,
+                FOREIGN KEY(session_id) REFERENCES sessions(id) ON DELETE CASCADE,
                 UNIQUE(session_id, kind, chunk_index)
             )
             """
@@ -57,6 +59,7 @@ def initialize_database() -> None:
 
 def get_connection() -> sqlite3.Connection:
     conn = sqlite3.connect(_db_path())
+    conn.execute("PRAGMA foreign_keys = ON;")
     conn.row_factory = sqlite3.Row
     return conn
 
