@@ -1,11 +1,15 @@
 from __future__ import annotations
 
 import html
+import hmac
 import json
+import logging
 import os
+import secrets
 import time
+import urllib.parse
 
-from fastapi import Depends, FastAPI, Form, HTTPException, Query, Request
+from fastapi import Depends, FastAPI, Form, HTTPException, Query, Request, BackgroundTasks
 from fastapi.responses import HTMLResponse, RedirectResponse
 
 from .auth import UI_AUTH_COOKIE, require_bearer_token
@@ -24,7 +28,22 @@ from .schemas import (
 from .semantic import SemanticMatch, cosine_similarity, decode_embedding
 from .storage import db, initialize_database
 
-app = FastAPI(title="DnD Scribe Server", version="0.1.0")
+logger = logging.getLogger("dnd_scribe")
+
+from contextlib import asynccontextmanager
+
+
+@asynccontextmanager
+async def lifespan(app: FastAPI):
+    initialize_database()
+    try:
+        with db() as conn:
+            conn.execute("DELETE FROM ui_sessions WHERE expires_at < ?", (int(time.time()),))
+    except Exception:
+        logger.exception("Failed to clean up expired sessions on startup")
+    _backfill_session_chunks()
+    _backfill_chunk_embeddings()
+    yield
 
 
 def _base_path() -> str:
@@ -36,12 +55,29 @@ def _base_path() -> str:
 
 BASE_PATH = _base_path()
 
+app = FastAPI(
+    title="DnD Scribe Server",
+    version="0.1.0",
+    lifespan=lifespan,
+    root_path=BASE_PATH
+)
 
-@app.on_event("startup")
-def on_startup() -> None:
-    initialize_database()
-    _backfill_session_chunks()
-    _backfill_chunk_embeddings()
+from fastapi.middleware.cors import CORSMiddleware
+from fastapi.middleware.trustedhost import TrustedHostMiddleware
+
+allowed_hosts = [h.strip() for h in os.environ.get("DND_SCRIBE_ALLOWED_HOSTS", "*").split(",") if h.strip()]
+if allowed_hosts and allowed_hosts != ["*"]:
+    app.add_middleware(TrustedHostMiddleware, allowed_hosts=allowed_hosts)
+
+cors_origins = [o.strip() for o in os.environ.get("DND_SCRIBE_CORS_ORIGINS", "*").split(",") if o.strip()]
+app.add_middleware(
+    CORSMiddleware,
+    allow_origins=cors_origins,
+    allow_credentials=True,
+    allow_methods=["*"],
+    allow_headers=["*"],
+)
+
 
 
 def _row_to_record(row) -> SessionRecord:
@@ -83,76 +119,75 @@ def _serialize_embedding(value: list[float] | None) -> str | None:
     return json.dumps(value) if value is not None else None
 
 
-def _replace_session_chunks(conn, session_row) -> None:
-    session_id = session_row["id"]
-    conn.execute("DELETE FROM session_chunks WHERE session_id = ?", (session_id,))
-    created_at = int(time.time() * 1000)
-    chunks = _session_text_chunks(session_row)
-    if not chunks:
-        return
+def _background_replace_session_chunks(session_id: str) -> None:
+    try:
+        with db() as conn:
+            row = conn.execute("SELECT * FROM sessions WHERE id = ?", (session_id,)).fetchone()
+        if not row:
+            return
 
-    embeddings: list[list[float]] | None = None
-    if get_embedding_config().enabled:
-        try:
-            embeddings = _embed_in_batches([text for _, _, text in chunks])
-        except Exception:
-            embeddings = None
+        chunks = _session_text_chunks(row)
+        if not chunks:
+            with db() as conn:
+                conn.execute("DELETE FROM session_chunks WHERE session_id = ?", (session_id,))
+            return
 
-    for chunk, embedding in zip(chunks, embeddings or [None] * len(chunks)):
-        kind, chunk_index, text = chunk
-        conn.execute(
-            """
-            INSERT INTO session_chunks (
-                session_id, chunk_index, kind, text, embedding, created_at, updated_at
-            ) VALUES (?, ?, ?, ?, ?, ?, ?)
-            ON CONFLICT(session_id, kind, chunk_index) DO UPDATE SET
-                text = excluded.text,
-                embedding = excluded.embedding,
-                updated_at = excluded.updated_at
-            """,
-            (
-                session_id,
-                chunk_index,
-                kind,
-                text,
-                _serialize_embedding(embedding),
-                created_at,
-                created_at,
-            ),
-        )
+        embeddings: list[list[float] | None] = [None] * len(chunks)
+        if get_embedding_config().enabled:
+            # Embed in batches, handling failures per batch independently
+            batch_size = 16
+            for start in range(0, len(chunks), batch_size):
+                end = start + batch_size
+                batch_texts = [chunk[2] for chunk in chunks[start:end]]
+                try:
+                    batch_vectors = embed_texts(batch_texts)
+                    for idx, vector in enumerate(batch_vectors):
+                        embeddings[start + idx] = vector
+                except Exception as e:
+                    logger.exception(f"Failed to generate embedding batch starting at {start} for session {session_id}: {e}")
 
+        # Write chunks in a short, atomic transaction
+        with db() as conn:
+            exists = conn.execute("SELECT 1 FROM sessions WHERE id = ?", (session_id,)).fetchone()
+            if not exists:
+                return
 
-def _chunk_row_to_dict(row) -> dict[str, object]:
-    return {
-        "id": row["id"],
-        "session_id": row["session_id"],
-        "chunk_index": row["chunk_index"],
-        "kind": row["kind"],
-        "text": row["text"],
-        "embedding": decode_embedding(row["embedding"]),
-        "created_at": row["created_at"],
-        "updated_at": row["updated_at"],
-    }
-
-
-def _embed_in_batches(texts: list[str]) -> list[list[float]]:
-    if not texts:
-        return []
-    # Keep batches modest for lightweight OpenAI-compatible embedding servers.
-    batch_size = 16
-    vectors: list[list[float]] = []
-    for start in range(0, len(texts), batch_size):
-        vectors.extend(embed_texts(texts[start:start + batch_size]))
-    return vectors
+            conn.execute("DELETE FROM session_chunks WHERE session_id = ?", (session_id,))
+            created_at = int(time.time() * 1000)
+            for chunk, embedding in zip(chunks, embeddings):
+                kind, chunk_index, text = chunk
+                conn.execute(
+                    """
+                    INSERT INTO session_chunks (
+                        session_id, chunk_index, kind, text, embedding, created_at, updated_at
+                    ) VALUES (?, ?, ?, ?, ?, ?, ?)
+                    """,
+                    (
+                        session_id,
+                        chunk_index,
+                        kind,
+                        text,
+                        _serialize_embedding(embedding),
+                        created_at,
+                        created_at,
+                    ),
+                )
+    except Exception as exc:
+        logger.exception(f"Failed background session chunk processing for {session_id}: {exc}")
 
 
 def _backfill_session_chunks() -> None:
-    with db() as conn:
-        sessions = conn.execute("SELECT * FROM sessions ORDER BY session_date ASC, updated_at ASC").fetchall()
+    try:
+        with db() as conn:
+            sessions = conn.execute("SELECT id FROM sessions").fetchall()
         for row in sessions:
-            existing = conn.execute("SELECT 1 FROM session_chunks WHERE session_id = ? LIMIT 1", (row["id"],)).fetchone()
+            session_id = row["id"]
+            with db() as conn:
+                existing = conn.execute("SELECT 1 FROM session_chunks WHERE session_id = ? LIMIT 1", (session_id,)).fetchone()
             if existing is None:
-                _replace_session_chunks(conn, row)
+                _background_replace_session_chunks(session_id)
+    except Exception:
+        logger.exception("Error during backfill_session_chunks")
 
 
 def _backfill_chunk_embeddings() -> None:
@@ -164,17 +199,26 @@ def _backfill_chunk_embeddings() -> None:
             rows = conn.execute(
                 "SELECT id, text FROM session_chunks WHERE embedding IS NULL OR embedding = '' ORDER BY id ASC"
             ).fetchall()
-            if not rows:
-                return
+        if not rows:
+            return
 
-            vectors = _embed_in_batches([row["text"] for row in rows])
-            for row, vector in zip(rows, vectors):
-                conn.execute(
-                    "UPDATE session_chunks SET embedding = ?, updated_at = ? WHERE id = ?",
-                    (_serialize_embedding(vector), int(time.time() * 1000), row["id"]),
-                )
+        batch_size = 16
+        for start in range(0, len(rows), batch_size):
+            batch_rows = rows[start:start + batch_size]
+            batch_texts = [row["text"] for row in batch_rows]
+            try:
+                vectors = embed_texts(batch_texts)
+                with db() as conn:
+                    for row, vector in zip(batch_rows, vectors):
+                        conn.execute(
+                            "UPDATE session_chunks SET embedding = ?, updated_at = ? WHERE id = ?",
+                            (_serialize_embedding(vector), int(time.time() * 1000), row["id"]),
+                        )
+            except Exception as e:
+                logger.exception(f"Backfill batch failed for chunk IDs {[r['id'] for r in batch_rows]}: {e}")
     except Exception:
-        return
+        logger.exception("Uncaught exception in _backfill_chunk_embeddings")
+
 
 
 def _preview(text: str, limit: int = 180) -> str:
@@ -200,15 +244,46 @@ def _ui_is_authenticated(request: Request) -> bool:
     expected = _ui_expected_token()
     if not expected:
         return True
-    return request.cookies.get(UI_AUTH_COOKIE) == expected
+    session_id = request.cookies.get(UI_AUTH_COOKIE)
+    if not session_id:
+        return False
+    try:
+        with db() as conn:
+            row = conn.execute(
+                "SELECT expires_at FROM ui_sessions WHERE session_id = ?",
+                (session_id,)
+            ).fetchone()
+        if row is None:
+            return False
+        if int(row["expires_at"]) < int(time.time()):
+            return False
+        return True
+    except Exception:
+        logger.exception("Failed to check UI session authentication")
+        return False
 
 
-def _ui_login_page(next_path: str = "/", message: str = "") -> HTMLResponse:
+def _is_safe_next(url: str) -> bool:
+    if not url:
+        return False
+    if ":" in url or url.startswith("//") or not url.startswith("/"):
+        return False
+    try:
+        parsed = urllib.parse.urlparse(url)
+        if parsed.scheme or parsed.netloc:
+            return False
+    except Exception:
+        return False
+    return True
+
+
+def _ui_login_page(next_path: str = "/", message: str = "", csrf_token: str = "") -> HTMLResponse:
     body = f'''
 <h1>DnD Scribe</h1>
 <div class="card">
   <form method="post" action="{_ui_path('/ui/login')}">
     <input type="hidden" name="next" value="{_html_escape(next_path)}" />
+    <input type="hidden" name="csrf_token" value="{_html_escape(csrf_token)}" />
     <label>Access token</label>
     <input name="token" type="password" autofocus placeholder="Bearer token" />
     <button type="submit">Log in</button>
@@ -232,6 +307,7 @@ def _fetch_latest_session():
 
 
 def _render_page(title: str, body: str) -> HTMLResponse:
+    base_path_json = json.dumps(BASE_PATH)
     return HTMLResponse(
         f"""<!doctype html>
 <html>
@@ -259,7 +335,7 @@ def _render_page(title: str, body: str) -> HTMLResponse:
 {body}
 <script>
 const tokenKey = 'dnd_scribe_token';
-const basePath = {BASE_PATH!r};
+const basePath = {base_path_json};
 
 function uiPath(path) {{
   if (!path.startsWith('/')) path = '/' + path;
@@ -276,10 +352,21 @@ function setToken(value) {{
   fields.forEach(field => {{ field.value = value || ''; }});
 }}
 
+function getCookie(name) {{
+  const value = `; ${{document.cookie}}`;
+  const parts = value.split(`; ${{name}}=`);
+  if (parts.length === 2) return parts.pop().split(';').shift();
+  return '';
+}}
+
 async function apiFetch(url, options = {{}}) {{
   const headers = new Headers(options.headers || {{}});
   const token = getToken();
   if (token) headers.set('Authorization', `Bearer ${{token}}`);
+  
+  const csrfToken = getCookie('dnd_scribe_csrf_token');
+  if (csrfToken) headers.set('X-CSRF-Token', csrfToken);
+  
   if (options.body && !headers.has('Content-Type')) headers.set('Content-Type', 'application/json');
   return fetch(url, {{ ...options, headers }});
 }}
@@ -315,28 +402,73 @@ def health() -> dict[str, str]:
 
 @app.get("/ui/login", response_class=HTMLResponse)
 def ui_login_page(request: Request, next: str = "/") -> HTMLResponse:
+    if not _is_safe_next(next):
+        next = "/"
     if _ui_is_authenticated(request):
         return RedirectResponse(url=_ui_path(next), status_code=303)
-    return _ui_login_page(next_path=next)
+
+    csrf_cookie = request.cookies.get("dnd_scribe_csrf_token")
+    if not csrf_cookie:
+        csrf_cookie = secrets.token_hex(16)
+
+    response = _ui_login_page(next_path=next, csrf_token=csrf_cookie)
+    allow_insecure = os.environ.get("DND_SCRIBE_COOKIE_INSECURE", "").lower() in ("true", "1", "yes")
+    response.set_cookie(
+        "dnd_scribe_csrf_token",
+        csrf_cookie,
+        httponly=False,
+        samesite="lax",
+        secure=not allow_insecure,
+        path=BASE_PATH or "/",
+    )
+    return response
 
 
 @app.post("/ui/login")
-def ui_login(token: str = Form(...), next: str = Form("/")) -> RedirectResponse:
-    expected = _ui_expected_token()
-    if expected and token != expected:
-        return _ui_login_page(next_path=next, message="Invalid token")
+def ui_login(
+    request: Request,
+    token: str = Form(...),
+    next: str = Form("/"),
+    csrf_token: str = Form(...)
+) -> RedirectResponse:
+    if not _is_safe_next(next):
+        next = "/"
 
+    csrf_cookie = request.cookies.get("dnd_scribe_csrf_token")
+    if not csrf_cookie or not hmac.compare_digest(csrf_token, csrf_cookie):
+        raise HTTPException(status_code=403, detail="CSRF token validation failed")
+
+    expected = _ui_expected_token()
+    if expected and not hmac.compare_digest(token, expected):
+        logger.warning(f"Failed login attempt from IP: {request.client.host if request.client else 'unknown'}")
+        return _ui_login_page(next_path=next, message="Invalid token", csrf_token=csrf_token)
+
+    logger.info(f"Successful login from IP: {request.client.host if request.client else 'unknown'}")
     response = RedirectResponse(url=_ui_path(next), status_code=303)
     if expected:
+        session_id = secrets.token_hex(32)
+        expires_at = int(time.time()) + 7 * 24 * 60 * 60
+        with db() as conn:
+            conn.execute(
+                "INSERT INTO ui_sessions (session_id, expires_at) VALUES (?, ?)",
+                (session_id, expires_at)
+            )
+
+        allow_insecure = os.environ.get("DND_SCRIBE_COOKIE_INSECURE", "").lower() in ("true", "1", "yes")
         response.set_cookie(
             UI_AUTH_COOKIE,
-            expected,
+            session_id,
             httponly=True,
             samesite="lax",
-            secure=False,
+            secure=not allow_insecure,
             path=BASE_PATH or "/",
         )
     return response
+
+
+def _escape_like_pattern(q: str) -> str:
+    escaped = q.replace("\\", "\\\\").replace("%", "\\%").replace("_", "\\_")
+    return f"%{escaped}%"
 
 
 @app.get("/", response_class=HTMLResponse)
@@ -350,23 +482,28 @@ def index(request: Request, q: str = "") -> HTMLResponse:
         try:
             results = _semantic_matches(q.strip(), limit=20)
             for match in results:
+                quoted_id = urllib.parse.quote(match.session_id)
                 items.append(
                     f'''<div class="list-item">
-  <div><a href="{_ui_path(f'/ui/sessions/{match.session_id}')}" ><strong>{_html_escape(match.session_name)}</strong></a></div>
+  <div><a href="{_ui_path(f'/ui/sessions/{quoted_id}')}" ><strong>{_html_escape(match.session_name)}</strong></a></div>
   <div class="muted small">{_html_escape(match.kind)} · score {match.score:.3f} · chunk {match.chunk_index}</div>
   <div class="small">{_html_escape(_preview(match.text, 240))}</div>
 </div>'''
                 )
-        except HTTPException:
+        except HTTPException as exc:
+            logger.exception(f"Semantic search failed, falling back to text search: {exc}")
             semantic_mode = False
     else:
         with db() as conn:
             if q.strip():
-                pattern = f"%{q}%"
+                pattern = _escape_like_pattern(q.strip())
                 rows = conn.execute(
                     """
                     SELECT * FROM sessions
-                    WHERE name LIKE ? OR notes LIKE ? OR final_summary LIKE ? OR full_transcript LIKE ?
+                    WHERE name LIKE ? ESCAPE '\\'
+                       OR notes LIKE ? ESCAPE '\\'
+                       OR final_summary LIKE ? ESCAPE '\\'
+                       OR full_transcript LIKE ? ESCAPE '\\'
                     ORDER BY session_date DESC, updated_at DESC
                     LIMIT 100
                     """,
@@ -378,13 +515,15 @@ def index(request: Request, q: str = "") -> HTMLResponse:
                 ).fetchall()
 
         for row in rows:
+            quoted_id = urllib.parse.quote(row["id"])
             items.append(
                 f'''<div class="list-item">
-  <div><a href="{_ui_path(f'/ui/sessions/{row["id"]}')}" ><strong>{_html_escape(row["name"])}</strong></a></div>
-  <div class="muted small">{row["id"]} · {row["session_date"]}</div>
+  <div><a href="{_ui_path(f'/ui/sessions/{quoted_id}')}" ><strong>{_html_escape(row["name"])}</strong></a></div>
+  <div class="muted small">{_html_escape(row["id"])} · {_html_escape(str(row["session_date"]))}</div>
   <div class="small">{_html_escape(_preview(row["final_summary"] or row["notes"] or row["full_transcript"]))}</div>
 </div>'''
             )
+
 
     body = f'''
 <h1>DnD Scribe</h1>
@@ -432,12 +571,12 @@ def session_page(request: Request, session_id: str) -> HTMLResponse:
 <div class="card">
   <div><strong>ID:</strong> {_html_escape(row["id"])}</div>
   <div><strong>Device:</strong> {_html_escape(row["device_id"])} </div>
-  <div><strong>Date:</strong> {row["session_date"]}</div>
-  <div><strong>Created:</strong> {row["created_at"]}</div>
-  <div><strong>Updated:</strong> {row["updated_at"]}</div>
+  <div><strong>Date:</strong> {_html_escape(str(row["session_date"]))}</div>
+  <div><strong>Created:</strong> {_html_escape(str(row["created_at"]))}</div>
+  <div><strong>Updated:</strong> {_html_escape(str(row["updated_at"]))}</div>
 </div>
 <div class="card">
-  <button class="danger" type="button" onclick="deleteSession('{_html_escape(row['id'])}')">Delete</button>
+  <button class="danger" type="button" onclick="deleteSession({_html_escape(json.dumps(row['id']))})">Delete</button>
 </div>
 <div class="card"><h3>Summary</h3><pre>{_html_escape(row["final_summary"])}</pre></div>
 <div class="card"><h3>Notes</h3><pre>{_html_escape(row["notes"])}</pre></div>
@@ -446,13 +585,25 @@ def session_page(request: Request, session_id: str) -> HTMLResponse:
     return _render_page(row["name"], body)
 
 
+
 @app.post("/sessions", response_model=SessionRecord, dependencies=[Depends(require_bearer_token)])
-def upsert_session(session: SessionCreate) -> SessionRecord:
+def upsert_session(session: SessionCreate, background_tasks: BackgroundTasks) -> SessionRecord:
     now = int(time.time() * 1000)
     with db() as conn:
-        existing = conn.execute("SELECT created_at FROM sessions WHERE id = ?", (session.id,)).fetchone()
+        existing = conn.execute("SELECT * FROM sessions WHERE id = ?", (session.id,)).fetchone()
         created_at = int(existing["created_at"]) if existing else now
         updated_at = session.updated_at or now
+        
+        content_changed = True
+        has_chunks = False
+        if existing:
+            content_changed = (
+                existing["full_transcript"] != session.full_transcript or
+                existing["notes"] != session.notes or
+                existing["final_summary"] != session.final_summary
+            )
+            has_chunks = conn.execute("SELECT 1 FROM session_chunks WHERE session_id = ? LIMIT 1", (session.id,)).fetchone() is not None
+
         conn.execute(
             """
             INSERT INTO sessions (
@@ -480,15 +631,65 @@ def upsert_session(session: SessionCreate) -> SessionRecord:
             ),
         )
         row = conn.execute("SELECT * FROM sessions WHERE id = ?", (session.id,)).fetchone()
-        _replace_session_chunks(conn, row)
+        
+        if content_changed or not has_chunks:
+            background_tasks.add_task(_background_replace_session_chunks, session.id)
+            
     return _row_to_record(row)
 
 
 @app.post("/sync", response_model=SyncResult, dependencies=[Depends(require_bearer_token)])
-def sync_sessions(payload: SyncRequest) -> SyncResult:
+def sync_sessions(payload: SyncRequest, background_tasks: BackgroundTasks) -> SyncResult:
     upserted: list[SessionRecord] = []
-    for session in payload.sessions:
-        upserted.append(upsert_session(session))
+    with db() as conn:
+        for session in payload.sessions:
+            now = int(time.time() * 1000)
+            existing = conn.execute("SELECT * FROM sessions WHERE id = ?", (session.id,)).fetchone()
+            created_at = int(existing["created_at"]) if existing else now
+            updated_at = session.updated_at or now
+            
+            content_changed = True
+            has_chunks = False
+            if existing:
+                content_changed = (
+                    existing["full_transcript"] != session.full_transcript or
+                    existing["notes"] != session.notes or
+                    existing["final_summary"] != session.final_summary
+                )
+                has_chunks = conn.execute("SELECT 1 FROM session_chunks WHERE session_id = ? LIMIT 1", (session.id,)).fetchone() is not None
+
+            conn.execute(
+                """
+                INSERT INTO sessions (
+                    id, device_id, name, session_date, full_transcript, notes, final_summary, created_at, updated_at
+                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
+                ON CONFLICT(id) DO UPDATE SET
+                    device_id = excluded.device_id,
+                    name = excluded.name,
+                    session_date = excluded.session_date,
+                    full_transcript = excluded.full_transcript,
+                    notes = excluded.notes,
+                    final_summary = excluded.final_summary,
+                    updated_at = excluded.updated_at
+                """,
+                (
+                    session.id,
+                    session.device_id,
+                    session.name,
+                    session.date,
+                    session.full_transcript,
+                    session.notes,
+                    session.final_summary,
+                    created_at,
+                    updated_at,
+                ),
+            )
+            row = conn.execute("SELECT * FROM sessions WHERE id = ?", (session.id,)).fetchone()
+            upserted.append(_row_to_record(row))
+            
+            if content_changed or not has_chunks:
+                background_tasks.add_task(_background_replace_session_chunks, session.id)
+                
     return SyncResult(upserted=len(upserted), sessions=upserted)
 
 
@@ -553,12 +754,15 @@ def get_latest_transcript() -> SessionFieldResponse:
 
 @app.get("/sessions/search", response_model=list[SessionListItem], dependencies=[Depends(require_bearer_token)])
 def search_sessions(q: str, limit: int = Query(default=50, ge=1, le=500)) -> list[SessionListItem]:
-    pattern = f"%{q}%"
+    pattern = _escape_like_pattern(q.strip())
     with db() as conn:
         rows = conn.execute(
             """
             SELECT * FROM sessions
-            WHERE name LIKE ? OR notes LIKE ? OR final_summary LIKE ? OR full_transcript LIKE ?
+            WHERE name LIKE ? ESCAPE '\\'
+               OR notes LIKE ? ESCAPE '\\'
+               OR final_summary LIKE ? ESCAPE '\\'
+               OR full_transcript LIKE ? ESCAPE '\\'
             ORDER BY session_date DESC, updated_at DESC
             LIMIT ?
             """,
@@ -597,8 +801,6 @@ def _semantic_matches(q: str, limit: int = 10) -> list[SemanticMatchResponse]:
         query_embedding = embed_texts([q])[0]
     except Exception as exc:
         raise HTTPException(status_code=503, detail=f"Embedding query failed: {exc}") from exc
-
-    _backfill_chunk_embeddings()
 
     matches: list[SemanticMatch] = []
     with db() as conn:

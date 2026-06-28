@@ -33,4 +33,5 @@ object RetrofitClient {
     val whisperApi: WhisperApi = retrofit(client(60)).create(WhisperApi::class.java)
     val llmApi: LlmApi = retrofit(client(240)).create(LlmApi::class.java)
     val cloudApi: CloudApi = retrofit(client(60)).create(CloudApi::class.java)
+    val ttsApi: TtsApi = retrofit(client(60)).create(TtsApi::class.java)
 }

@@ -48,6 +48,19 @@ object AiSessionClient {
         return getCompletion(config, config.finalPrompt, content)
     }
 
+    suspend fun synthesizeSpeech(config: AppConfig, text: String): Pair<ByteArray, String?>? {
+        val ttsUrl = if (config.useLlmUrlForTts) config.llmUrl else config.ttsUrl
+        val ttsKey = if (config.useLlmUrlForTts) config.llmApiKey else config.ttsApiKey
+        val endpoint = buildEndpoint(ttsUrl, "/v1/audio/speech", config.allowInsecureHttp) ?: return null
+        if (endpoint.isBlank()) return null
+        val auth = ttsKey.takeIf { it.isNotBlank() }?.let { "Bearer $it" }
+        val response = RetrofitClient.ttsApi.synthesizeSpeech(
+            endpoint, auth,
+            TtsRequest(model = config.ttsModel, input = text, voice = config.ttsVoice)
+        )
+        return Pair(response.bytes(), response.contentType()?.toString())
+    }
+
     private suspend fun getCompletion(config: AppConfig, prompt: String, content: String): String? {
         val endpoint = buildEndpoint(config.llmUrl, "/v1/chat/completions", config.allowInsecureHttp) ?: return null
         val auth = config.llmApiKey.takeIf { it.isNotBlank() }?.let { "Bearer $it" }

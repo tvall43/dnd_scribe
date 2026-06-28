@@ -39,6 +39,10 @@ app/build/
 # Proguard configuration files
 proguard-rules.pro
 
+# Debug artifacts
+logcat.txt
+output*.wav
+
 # Miscellaneous
 *.apk
 *.ap_

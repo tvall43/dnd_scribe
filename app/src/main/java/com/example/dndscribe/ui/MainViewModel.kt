@@ -3,6 +3,10 @@ package com.example.dndscribe.ui
 import android.app.Application
 import android.content.Context
 import android.content.Intent
+import android.media.AudioAttributes
+import android.media.AudioFormat
+import android.media.AudioTrack
+import android.media.MediaPlayer
 import android.net.Uri
 import android.widget.Toast
 import android.util.Log
@@ -22,8 +26,11 @@ import com.example.dndscribe.recording.RecordingService
 import com.google.gson.Gson
 import com.google.gson.reflect.TypeToken
 import androidx.core.content.FileProvider
+import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.delay
 import kotlinx.coroutines.flow.*
 import kotlinx.coroutines.launch
+import kotlinx.coroutines.withContext
 import java.io.File
 import java.text.SimpleDateFormat
 import java.util.Date
@@ -45,6 +52,14 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
     val isRecording = ActiveSessionState.isRecording
     val isUpdatingNotes = ActiveSessionState.isUpdatingNotes
     val isGeneratingFinal = ActiveSessionState.isGeneratingFinal
+
+    private val _isSpeaking = MutableStateFlow(false)
+    val isSpeaking = _isSpeaking.asStateFlow()
+
+    private var ttsMediaPlayer: MediaPlayer? = null
+    private var ttsAudioTrack: AudioTrack? = null
+    private var ttsAudioFile: File? = null
+    @Volatile private var ttsStopped = false
 
     private val _searchQuery = MutableStateFlow("")
     val searchQuery = _searchQuery.asStateFlow()
@@ -329,6 +344,212 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
                 Toast.makeText(context, "Settings restore failed: ${e.message}", Toast.LENGTH_SHORT).show()
             }
         }
+    }
+
+    fun speakSummary(text: String) {
+        if (text.isBlank()) {
+            Toast.makeText(getApplication(), "Nothing to speak", Toast.LENGTH_SHORT).show()
+            return
+        }
+        val cfg = _config.value
+        val ttsUrl = if (cfg.useLlmUrlForTts) cfg.llmUrl else cfg.ttsUrl
+        if (!AiSessionClient.validateBaseUrl(ttsUrl, cfg.allowInsecureHttp)) {
+            Toast.makeText(getApplication(), "Set a valid TTS URL. Enable insecure HTTP if you need http:// endpoints.", Toast.LENGTH_LONG).show()
+            return
+        }
+        _isSpeaking.value = true
+        viewModelScope.launch(Dispatchers.IO) {
+            try {
+                val result = AiSessionClient.synthesizeSpeech(cfg, text) ?: return@launch
+                val (audioBytes, contentType) = result
+                if (audioBytes.isEmpty()) {
+                    Log.w("MainViewModel", "TTS returned empty audio")
+                    withContext(Dispatchers.Main) { Toast.makeText(getApplication(), "TTS returned empty audio", Toast.LENGTH_SHORT).show() }
+                    cleanupTts()
+                    return@launch
+                }
+                Log.d("MainViewModel", "TTS response: contentType=$contentType size=${audioBytes.size} firstBytes=${audioBytes.take(8).joinToString("") { "%02x".format(it) }}")
+                val app = getApplication<Application>()
+                if (audioBytes.size >= 12 && audioBytes[0] == 0x52.toByte() && audioBytes[1] == 0x49.toByte() && audioBytes[2] == 0x46.toByte() && audioBytes[3] == 0x46.toByte()) {
+                    withContext(Dispatchers.IO) {
+                        playWavDirect(audioBytes, app)
+                    }
+                } else {
+                    val ext = when {
+                        audioBytes.size >= 4 && audioBytes[0] == 0x4F.toByte() && audioBytes[1] == 0x67.toByte() && audioBytes[2] == 0x67.toByte() && audioBytes[3] == 0x53.toByte() -> "ogg"
+                        audioBytes.size >= 4 && audioBytes[0] == 0x66.toByte() && audioBytes[1] == 0x4C.toByte() && audioBytes[2] == 0x61.toByte() && audioBytes[3] == 0x43.toByte() -> "flac"
+                        audioBytes.size >= 3 && audioBytes[0] == 0x49.toByte() && audioBytes[1] == 0x44.toByte() && audioBytes[2] == 0x33.toByte() -> "mp3"
+                        contentType?.startsWith("audio/") == true -> contentType.substringAfter("audio/").substringBefore(";").substringBefore("x-").let { if (it.isBlank()) "wav" else it }
+                        else -> "wav"
+                    }
+                    val tempFile = File(app.cacheDir, "tts_playback.$ext")
+                    if (tempFile.exists()) tempFile.delete()
+                    tempFile.writeBytes(audioBytes)
+                    ttsAudioFile = tempFile
+                    withContext(Dispatchers.Main) {
+                        val player = MediaPlayer().apply {
+                            setDataSource(tempFile.absolutePath)
+                            setOnPreparedListener {
+                                start()
+                                setOnCompletionListener { cleanupTts() }
+                            }
+                            setOnErrorListener { _, what, extra ->
+                                Log.e("MainViewModel", "MediaPlayer error: what=$what extra=$extra ext=$ext contentType=$contentType size=${audioBytes.size}")
+                                Toast.makeText(app, "TTS playback error ($what/$extra)", Toast.LENGTH_SHORT).show()
+                                cleanupTts()
+                                true
+                            }
+                        }
+                        ttsMediaPlayer = player
+                        player.prepareAsync()
+                    }
+                }
+            } catch (e: Exception) {
+                Log.e("MainViewModel", "TTS failed", e)
+                withContext(Dispatchers.Main) { Toast.makeText(getApplication(), "TTS failed: ${e.message}", Toast.LENGTH_SHORT).show() }
+                cleanupTts()
+            }
+        }
+    }
+
+    private suspend fun playWavDirect(audioBytes: ByteArray, app: Application) {
+        try {
+            var offset = 12
+            var sampleRate = 22050
+            var channels = 1
+            var bitsPerSample = 16
+            var dataOffset = 0
+            var dataSize = 0
+            while (offset + 8 <= audioBytes.size) {
+                val chunkId = String(audioBytes, offset, 4, Charsets.US_ASCII)
+                val rawSize = ((audioBytes[offset + 7].toInt() and 0xFF) shl 24) or
+                    ((audioBytes[offset + 6].toInt() and 0xFF) shl 16) or
+                    ((audioBytes[offset + 5].toInt() and 0xFF) shl 8) or
+                    (audioBytes[offset + 4].toInt() and 0xFF)
+                var chunkSize = rawSize
+                if (rawSize == -1) chunkSize = audioBytes.size - offset - 8
+                when (chunkId) {
+                    "fmt " -> {
+                        val formatTag = ((audioBytes[offset + 9].toInt() and 0xFF) shl 8) or (audioBytes[offset + 8].toInt() and 0xFF)
+                        if (formatTag != 1) {
+                            Log.e("MainViewModel", "Unsupported WAV format: $formatTag (only PCM=1 supported)")
+                            withContext(Dispatchers.Main) { Toast.makeText(app, "Unsupported WAV format ($formatTag)", Toast.LENGTH_SHORT).show() }
+                            cleanupTts()
+                            return
+                        }
+                        channels = ((audioBytes[offset + 11].toInt() and 0xFF) shl 8) or (audioBytes[offset + 10].toInt() and 0xFF)
+                        sampleRate = ((audioBytes[offset + 15].toInt() and 0xFF) shl 24) or
+                            ((audioBytes[offset + 14].toInt() and 0xFF) shl 16) or
+                            ((audioBytes[offset + 13].toInt() and 0xFF) shl 8) or
+                            (audioBytes[offset + 12].toInt() and 0xFF)
+                        bitsPerSample = ((audioBytes[offset + 23].toInt() and 0xFF) shl 8) or (audioBytes[offset + 22].toInt() and 0xFF)
+                    }
+                    "data" -> {
+                        dataOffset = offset + 8
+                        dataSize = minOf(chunkSize, audioBytes.size - dataOffset)
+                    }
+                }
+                offset += 8 + chunkSize
+                if (offset >= audioBytes.size) break
+            }
+            if (dataSize <= 0) {
+                Log.w("MainViewModel", "No data chunk found in WAV")
+                withContext(Dispatchers.Main) { Toast.makeText(app, "No audio data in WAV", Toast.LENGTH_SHORT).show() }
+                cleanupTts()
+                return
+            }
+            val channelConfig = if (channels == 2) AudioFormat.CHANNEL_OUT_STEREO else AudioFormat.CHANNEL_OUT_MONO
+            val audioFormat = when (bitsPerSample) {
+                8 -> AudioFormat.ENCODING_PCM_8BIT
+                else -> AudioFormat.ENCODING_PCM_16BIT
+            }
+            val minBuf = AudioTrack.getMinBufferSize(sampleRate, channelConfig, audioFormat)
+            if (minBuf == AudioTrack.ERROR_BAD_VALUE || minBuf == AudioTrack.ERROR) {
+                Log.e("MainViewModel", "Invalid audio params: sampleRate=$sampleRate channels=$channels bits=$bitsPerSample")
+                withContext(Dispatchers.Main) { Toast.makeText(app, "Unsupported audio format ($sampleRate/$channels/$bitsPerSample)", Toast.LENGTH_SHORT).show() }
+                cleanupTts()
+                return
+            }
+            Log.d("MainViewModel", "WAV parsed: sampleRate=$sampleRate channels=$channels bits=$bitsPerSample dataSize=$dataSize minBuf=$minBuf")
+            val frameSize = channels * (bitsPerSample / 8)
+            val totalFrames = dataSize / frameSize
+            val durationMs = (totalFrames * 1000L) / sampleRate
+            _isSpeaking.value = true
+            ttsMediaPlayer = null
+            ttsAudioFile = null
+            ttsStopped = false
+            val track = AudioTrack.Builder()
+                .setAudioAttributes(AudioAttributes.Builder()
+                    .setUsage(AudioAttributes.USAGE_MEDIA)
+                    .setContentType(AudioAttributes.CONTENT_TYPE_SPEECH)
+                    .build())
+                .setAudioFormat(AudioFormat.Builder()
+                    .setEncoding(audioFormat)
+                    .setSampleRate(sampleRate)
+                    .setChannelMask(channelConfig)
+                    .build())
+                .setBufferSizeInBytes(minBuf.coerceAtLeast(65536))
+                .setTransferMode(AudioTrack.MODE_STREAM)
+                .build()
+            if (track.state != AudioTrack.STATE_INITIALIZED) {
+                Log.e("MainViewModel", "AudioTrack failed to initialize (stream mode)")
+                track.release()
+                withContext(Dispatchers.Main) { Toast.makeText(app, "AudioTrack init failed", Toast.LENGTH_SHORT).show() }
+                cleanupTts()
+                return
+            }
+            ttsAudioTrack = track
+            track.play()
+            var written = 0
+            while (written < dataSize) {
+                if (ttsStopped) break
+                val end = minOf(written + 8192, dataSize)
+                track.write(audioBytes, dataOffset + written, end - written)
+                written = end
+            }
+            if (!ttsStopped) {
+                delay(durationMs + 200)
+            }
+            if (track.playState == AudioTrack.PLAYSTATE_PLAYING) {
+                track.stop()
+            }
+            track.release()
+            cleanupTts()
+        } catch (e: Exception) {
+            Log.e("MainViewModel", "WAV direct playback failed", e)
+            withContext(Dispatchers.Main) { Toast.makeText(app, "TTS playback failed: ${e.message}", Toast.LENGTH_SHORT).show() }
+            cleanupTts()
+        }
+    }
+
+    fun stopSpeaking() {
+        cleanupTts()
+    }
+
+    private fun cleanupTts() {
+        ttsStopped = true
+        ttsAudioTrack?.apply {
+            if (playState == AudioTrack.PLAYSTATE_PLAYING) {
+                pause()
+                flush()
+                stop()
+            }
+            release()
+        }
+        ttsAudioTrack = null
+        ttsMediaPlayer?.apply {
+            if (isPlaying) stop()
+            release()
+        }
+        ttsMediaPlayer = null
+        ttsAudioFile?.delete()
+        ttsAudioFile = null
+        _isSpeaking.value = false
+    }
+
+    override fun onCleared() {
+        super.onCleared()
+        cleanupTts()
     }
 
     fun importArchives(uri: Uri, context: Context) {

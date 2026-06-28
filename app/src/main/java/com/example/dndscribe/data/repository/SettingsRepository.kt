@@ -29,6 +29,11 @@ data class AppConfig(
     val cloudUrl: String = "",
     val cloudApiKey: String = "",
     val cloudDeviceId: String = "android",
+    val useLlmUrlForTts: Boolean = true,
+    val ttsUrl: String = "",
+    val ttsApiKey: String = "",
+    val ttsModel: String = "tts-1",
+    val ttsVoice: String = "",
     val notesPrompt: String = "You are a D&D session scribe. Given the transcript excerpt below, write a short paragraph (4-6 sentences) summarizing what just happened. Focus on: what the party did, any NPCs they interacted with, decisions made, and anything discovered. Write in past tense. Be concise — this is a running log entry, not a full summary.",
     val finalPrompt: String = "You are a meticulous D&D session scribe. Given the session notes below, produce structured session summary:\n\n## Session Summary\nA 2-3 sentence narrative overview.\n\n## Key Events\n- Bullet list of major plot moments in order.\n\n## NPCs Encountered\n- Name: brief description / role / attitude\n\n## Decisions Made\n- Notable choices the party made\n\n## Loot & Discoveries\n- Items found, secrets uncovered, locations revealed\n\n## Threads & Hooks\n- Unresolved threads or hooks for next session\n\nKeep it concise but complete. Write in past tense."
 )
@@ -52,6 +57,11 @@ class SettingsRepository(private val context: Context) {
         val CLOUD_URL = stringPreferencesKey("cloud_url")
         val CLOUD_API_KEY = stringPreferencesKey("cloud_api_key")
         val CLOUD_DEVICE_ID = stringPreferencesKey("cloud_device_id")
+        val USE_LLM_URL_FOR_TTS = booleanPreferencesKey("use_llm_url_for_tts")
+        val TTS_URL = stringPreferencesKey("tts_url")
+        val TTS_API_KEY = stringPreferencesKey("tts_api_key")
+        val TTS_MODEL = stringPreferencesKey("tts_model")
+        val TTS_VOICE = stringPreferencesKey("tts_voice")
         val NOTES_PROMPT = stringPreferencesKey("notes_prompt")
         val FINAL_PROMPT = stringPreferencesKey("final_prompt")
     }
@@ -83,6 +93,11 @@ class SettingsRepository(private val context: Context) {
                 cloudUrl = preferences[Keys.CLOUD_URL] ?: "",
                 cloudApiKey = preferences[Keys.CLOUD_API_KEY] ?: "",
                 cloudDeviceId = preferences[Keys.CLOUD_DEVICE_ID] ?: "android",
+                useLlmUrlForTts = preferences[Keys.USE_LLM_URL_FOR_TTS] ?: true,
+                ttsUrl = preferences[Keys.TTS_URL] ?: "",
+                ttsApiKey = preferences[Keys.TTS_API_KEY] ?: "",
+                ttsModel = preferences[Keys.TTS_MODEL] ?: AppConfig().ttsModel,
+                ttsVoice = preferences[Keys.TTS_VOICE] ?: "",
                 notesPrompt = preferences[Keys.NOTES_PROMPT] ?: AppConfig().notesPrompt,
                 finalPrompt = preferences[Keys.FINAL_PROMPT] ?: AppConfig().finalPrompt
             )
@@ -107,6 +122,11 @@ class SettingsRepository(private val context: Context) {
             preferences[Keys.CLOUD_URL] = config.cloudUrl
             preferences[Keys.CLOUD_API_KEY] = config.cloudApiKey
             preferences[Keys.CLOUD_DEVICE_ID] = config.cloudDeviceId
+            preferences[Keys.USE_LLM_URL_FOR_TTS] = config.useLlmUrlForTts
+            preferences[Keys.TTS_URL] = config.ttsUrl
+            preferences[Keys.TTS_API_KEY] = config.ttsApiKey
+            preferences[Keys.TTS_MODEL] = config.ttsModel
+            preferences[Keys.TTS_VOICE] = config.ttsVoice
             preferences[Keys.NOTES_PROMPT] = config.notesPrompt
             preferences[Keys.FINAL_PROMPT] = config.finalPrompt
         }

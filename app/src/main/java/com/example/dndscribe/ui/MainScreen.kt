@@ -10,6 +10,9 @@ import androidx.compose.foundation.lazy.LazyColumn
 import androidx.compose.foundation.lazy.items
 import androidx.compose.foundation.text.selection.SelectionContainer
 import androidx.compose.material.icons.Icons
+import androidx.compose.material.icons.automirrored.filled.ArrowBack
+import androidx.compose.material.icons.automirrored.filled.NoteAdd
+import androidx.compose.material.icons.automirrored.filled.VolumeUp
 import androidx.compose.material.icons.filled.*
 import androidx.compose.material3.*
 import androidx.compose.material3.TabRowDefaults.tabIndicatorOffset
@@ -28,6 +31,30 @@ import com.example.dndscribe.ui.theme.Parchment
 import java.text.SimpleDateFormat
 import java.util.*
 
+@Composable
+private fun LabeledActionButton(
+    label: String,
+    icon: androidx.compose.ui.graphics.vector.ImageVector,
+    onClick: () -> Unit,
+    enabled: Boolean = true,
+    accentColor: Color = Gold,
+) {
+    TextButton(
+        onClick = onClick,
+        enabled = enabled,
+        colors = ButtonDefaults.textButtonColors(
+            contentColor = accentColor,
+            disabledContentColor = accentColor.copy(alpha = 0.45f)
+        ),
+        contentPadding = PaddingValues(horizontal = 10.dp, vertical = 4.dp)
+    ) {
+        Row(verticalAlignment = Alignment.CenterVertically, horizontalArrangement = Arrangement.spacedBy(4.dp)) {
+            Icon(icon, contentDescription = label, tint = accentColor)
+            Text(label)
+        }
+    }
+}
+
 @OptIn(ExperimentalMaterial3Api::class)
 @Composable
 fun MainScreen(viewModel: MainViewModel = viewModel()) {
@@ -41,29 +68,20 @@ fun MainScreen(viewModel: MainViewModel = viewModel()) {
             CenterAlignedTopAppBar(
                 title = { Text("⚔️ DnD Scribe", color = Gold, fontWeight = FontWeight.Bold) },
                 actions = {
-                    IconButton(onClick = { viewModel.saveCurrentSession() }, enabled = !isRecording) {
-                        Icon(Icons.Default.Save, contentDescription = "Save", tint = Gold)
-                    }
+                    LabeledActionButton(label = "Save", icon = Icons.Default.Save, onClick = { viewModel.saveCurrentSession() }, enabled = !isRecording)
                     if (selectedTab == 1) {
-                        IconButton(onClick = { viewModel.generateNote() }) {
-                            Icon(Icons.Default.NoteAdd, contentDescription = "Add note now", tint = Gold)
-                        }
+                        LabeledActionButton(label = "Add note", icon = Icons.AutoMirrored.Filled.NoteAdd, onClick = { viewModel.generateNote() })
                     }
                     if (selectedTab == 2) {
-                        IconButton(onClick = { viewModel.generateFinal() }) {
-                            Icon(Icons.Default.AutoAwesome, contentDescription = "Generate final summary", tint = Gold)
-                        }
+                        LabeledActionButton(label = "Final summary", icon = Icons.Default.AutoAwesome, onClick = { viewModel.generateFinal() })
                     }
-                    IconButton(onClick = { viewModel.toggleRecording() }) {
-                        Icon(
-                            if (isRecording) Icons.Default.Stop else Icons.Default.Mic,
-                            contentDescription = if (isRecording) "Stop recording" else "Start recording",
-                            tint = if (isRecording) Color.Red else Gold
-                        )
-                    }
-                    IconButton(onClick = { showSettings = true }) {
-                        Icon(Icons.Default.Settings, contentDescription = "Settings", tint = Gold)
-                    }
+                    LabeledActionButton(
+                        label = if (isRecording) "Stop" else "Record",
+                        icon = if (isRecording) Icons.Default.Stop else Icons.Default.Mic,
+                        onClick = { viewModel.toggleRecording() },
+                        accentColor = if (isRecording) Color.Red else Gold
+                    )
+                    LabeledActionButton(label = "Settings", icon = Icons.Default.Settings, onClick = { showSettings = true })
                 },
                 colors = TopAppBarDefaults.centerAlignedTopAppBarColors(containerColor = Ink)
             )
@@ -229,7 +247,14 @@ fun ArchivesPane(viewModel: MainViewModel) {
     }
 
     if (selectedSession != null) {
-        SessionDetailView(session = selectedSession!!, onBack = { selectedSession = null })
+        val isSpeaking by viewModel.isSpeaking.collectAsState()
+        SessionDetailView(
+            session = selectedSession!!,
+            onBack = { selectedSession = null },
+            onSpeakSummary = { text -> viewModel.speakSummary(text) },
+            onStopSpeaking = { viewModel.stopSpeaking() },
+            isSpeaking = isSpeaking
+        )
     } else {
         Column {
             Row(
@@ -247,21 +272,11 @@ fun ArchivesPane(viewModel: MainViewModel) {
                         unfocusedContainerColor = Color.White.copy(alpha = 0.5f)
                     )
                 )
-                IconButton(onClick = { viewModel.exportArchives(context) }) {
-                    Icon(Icons.Default.Share, contentDescription = "Export All", tint = Gold)
-                }
-                IconButton(onClick = { viewModel.exportSettings(context) }) {
-                    Icon(Icons.Default.SettingsBackupRestore, contentDescription = "Backup Settings", tint = Gold)
-                }
-                IconButton(onClick = { settingsPickerLauncher.launch("application/json") }) {
-                    Icon(Icons.Default.Restore, contentDescription = "Restore Settings", tint = Gold)
-                }
-                IconButton(onClick = { filePickerLauncher.launch("application/json") }) {
-                    Icon(Icons.Default.FileUpload, contentDescription = "Import", tint = Gold)
-                }
-                IconButton(onClick = { viewModel.pullFromCloud(context) }) {
-                    Icon(Icons.Default.CloudDownload, contentDescription = "Pull from Cloud", tint = Gold)
-                }
+                LabeledActionButton(label = "Export all", icon = Icons.Default.Share, onClick = { viewModel.exportArchives(context) })
+                LabeledActionButton(label = "Backup settings", icon = Icons.Default.SettingsBackupRestore, onClick = { viewModel.exportSettings(context) })
+                LabeledActionButton(label = "Restore settings", icon = Icons.Default.Restore, onClick = { settingsPickerLauncher.launch("application/json") })
+                LabeledActionButton(label = "Import JSON", icon = Icons.Default.FileUpload, onClick = { filePickerLauncher.launch("application/json") })
+                LabeledActionButton(label = "Pull cloud", icon = Icons.Default.CloudDownload, onClick = { viewModel.pullFromCloud(context) })
             }
             LazyColumn(modifier = Modifier.fillMaxSize()) {
                 items(sessions) { session ->
@@ -271,8 +286,8 @@ fun ArchivesPane(viewModel: MainViewModel) {
                             Text(SimpleDateFormat("MMM dd, yyyy", Locale.getDefault()).format(Date(session.date))) 
                         },
                         trailingContent = {
-                            IconButton(onClick = { viewModel.deleteSession(session) }) {
-                                Icon(Icons.Default.Delete, contentDescription = "Delete", tint = Color.Gray)
+                            TextButton(onClick = { viewModel.deleteSession(session) }) {
+                                Text("Delete", color = Color.Gray)
                             }
                         },
                         modifier = Modifier.clickable { selectedSession = session }
@@ -286,13 +301,26 @@ fun ArchivesPane(viewModel: MainViewModel) {
 
 @OptIn(ExperimentalMaterial3Api::class)
 @Composable
-fun SessionDetailView(session: com.example.dndscribe.data.local.SessionEntity, onBack: () -> Unit) {
+fun SessionDetailView(
+    session: com.example.dndscribe.data.local.SessionEntity,
+    onBack: () -> Unit,
+    onSpeakSummary: (String) -> Unit = {},
+    onStopSpeaking: () -> Unit = {},
+    isSpeaking: Boolean = false
+) {
     Column(modifier = Modifier.fillMaxSize().background(Parchment)) {
         TopAppBar(
             title = { Text(session.name, fontSize = 16.sp) },
             navigationIcon = {
                 IconButton(onClick = onBack) {
-                    Icon(Icons.Default.ArrowBack, contentDescription = "Back")
+                    Icon(Icons.AutoMirrored.Filled.ArrowBack, contentDescription = "Back")
+                }
+            },
+            actions = {
+                if (isSpeaking) {
+                    LabeledActionButton(label = "Stop", icon = Icons.Default.Stop, onClick = onStopSpeaking, accentColor = Color.Red)
+                } else {
+                    LabeledActionButton(label = "Speak", icon = Icons.AutoMirrored.Filled.VolumeUp, onClick = { onSpeakSummary(session.finalSummary) }, accentColor = Ink)
                 }
             },
             colors = TopAppBarDefaults.topAppBarColors(containerColor = Gold, titleContentColor = Ink)
@@ -424,6 +452,22 @@ fun SettingsDialog(viewModel: MainViewModel, onDismiss: () -> Unit) {
                             Text("Sync Now", color = Ink)
                         }
                     }
+
+                    Spacer(modifier = Modifier.height(16.dp))
+                    Text("TTS Config", fontWeight = FontWeight.Bold)
+                    Row(verticalAlignment = Alignment.CenterVertically) {
+                        Checkbox(
+                            checked = config.useLlmUrlForTts,
+                            onCheckedChange = { viewModel.updateConfig(config.copy(useLlmUrlForTts = it)) }
+                        )
+                        Text("Use LLM URL for TTS")
+                    }
+                    if (!config.useLlmUrlForTts) {
+                        TextField(value = config.ttsUrl, onValueChange = { viewModel.updateConfig(config.copy(ttsUrl = it)) }, label = { Text("TTS Base URL") })
+                        TextField(value = config.ttsApiKey, onValueChange = { viewModel.updateConfig(config.copy(ttsApiKey = it)) }, label = { Text("TTS API Key") })
+                    }
+                    TextField(value = config.ttsModel, onValueChange = { viewModel.updateConfig(config.copy(ttsModel = it)) }, label = { Text("TTS Model") })
+                    TextField(value = config.ttsVoice, onValueChange = { viewModel.updateConfig(config.copy(ttsVoice = it)) }, label = { Text("TTS Voice") })
                 }
             }
         },

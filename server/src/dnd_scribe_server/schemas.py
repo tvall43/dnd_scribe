@@ -1,14 +1,17 @@
-from pydantic import BaseModel, Field
+from pydantic import BaseModel, Field, ConfigDict
 
 
 class SessionBase(BaseModel):
-    id: str = Field(min_length=1)
-    device_id: str | None = None
-    name: str = Field(min_length=1)
-    date: int
-    full_transcript: str = ""
-    notes: str = ""
-    final_summary: str = ""
+    model_config = ConfigDict(extra="forbid")
+
+    id: str = Field(min_length=1, max_length=255)
+    device_id: str | None = Field(default=None, max_length=255)
+    name: str = Field(min_length=1, max_length=255)
+    date: int = Field(ge=0)
+    full_transcript: str = Field(default="", max_length=10000000)
+    notes: str = Field(default="", max_length=5000000)
+    final_summary: str = Field(default="", max_length=5000000)
+
 
 
 class SessionCreate(SessionBase):

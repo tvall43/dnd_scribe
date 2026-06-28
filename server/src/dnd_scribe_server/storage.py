@@ -54,12 +54,21 @@ def initialize_database() -> None:
         )
         conn.execute("CREATE INDEX IF NOT EXISTS idx_session_chunks_session_id ON session_chunks(session_id)")
         conn.execute("CREATE INDEX IF NOT EXISTS idx_session_chunks_kind ON session_chunks(kind)")
+        conn.execute(
+            """
+            CREATE TABLE IF NOT EXISTS ui_sessions (
+                session_id TEXT PRIMARY KEY,
+                expires_at INTEGER NOT NULL
+            )
+            """
+        )
         conn.commit()
 
 
 def get_connection() -> sqlite3.Connection:
     conn = sqlite3.connect(_db_path())
     conn.execute("PRAGMA foreign_keys = ON;")
+    conn.execute("PRAGMA busy_timeout = 5000;")
     conn.row_factory = sqlite3.Row
     return conn
 
@@ -68,7 +77,15 @@ def get_connection() -> sqlite3.Connection:
 def db() -> Iterator[sqlite3.Connection]:
     conn = get_connection()
     try:
+        conn.execute("BEGIN IMMEDIATE;")
         yield conn
         conn.commit()
+    except Exception:
+        try:
+            conn.rollback()
+        except sqlite3.Error:
+            pass
+        raise
     finally:
         conn.close()
+

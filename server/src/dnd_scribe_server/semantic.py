@@ -30,4 +30,8 @@ def cosine_similarity(left: list[float], right: list[float]) -> float:
 def decode_embedding(raw: str | None) -> list[float] | None:
     if not raw:
         return None
-    return json.loads(raw)
+    try:
+        return json.loads(raw)
+    except json.JSONDecodeError:
+        return None
+
